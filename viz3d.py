@@ -1,14 +1,15 @@
 from __future__ import annotations
 
 import math
-import tkinter as tk
+import itertools
 from fractions import Fraction
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
-from tkinter import messagebox
+import tkinter as tk
+from tkinter import messagebox, ttk
 
+from utils import fmt_num, fr, sense_to_standard
 from models import ProblemData
-from utils import fr
 
 def _halfspace_feasible(x: float, y: float, z: float,
                         planes: List[Tuple[float, float, float, float, str]],
@@ -23,6 +24,7 @@ def _halfspace_feasible(x: float, y: float, z: float,
         if sense == "=" and abs(lhs - d) > tol:
             return False
     return True
+
 
 def _intersect_3planes(p1, p2, p3):
     (a1, b1, c1, d1, _) = p1
@@ -43,6 +45,7 @@ def _intersect_3planes(p1, p2, p3):
           - b1 * (a2 * d3 - a3 * d2)
           + d1 * (a2 * b3 - a3 * b2)) / det)
     return x, y, z
+
 
 def _convex_hull_3d_simple(pts: List[Tuple[float, float, float]]):
     if len(pts) < 3:
@@ -70,7 +73,10 @@ def _convex_hull_3d_simple(pts: List[Tuple[float, float, float]]):
 
 class Viz3DMixin:
 
-    def visualize_three_variable_problem(self) -> None:
+    def visualize_three_variable_problem(self, report=None) -> None:
+        # report (SolveReport | None): nếu có, dùng status và nghiệm từ engine.
+        #   Sửa lỗi unbounded/infeasible báo nghiệm sai.
+        #   Nếu None (chưa giải), fallback về vertex enumeration như cũ.
         try:
             prob = self._collect_problem()
         except Exception as exc:
@@ -84,12 +90,27 @@ class Viz3DMixin:
             )
             return
 
+        # --- Kiểm tra trạng thái từ engine ---
+        status = report.status if report is not None else None
+        if status == "infeasible":
+            messagebox.showinfo(
+                "Trực quan hóa 3D",
+                "Bài toán vô nghiệm — miền khả thi rỗng.\n"
+                "Sẽ vẽ các mặt phẳng ràng buộc nhưng không có polytope."
+            )
+        elif status == "unbounded":
+            messagebox.showwarning(
+                "Trực quan hóa 3D",
+                "Bài toán không giới nội — hàm mục tiêu tiến đến vô cực.\n"
+                "Sẽ vẽ miền khả thi nhưng không đánh dấu điểm tối ưu."
+            )
+
         try:
             import numpy as np
             import matplotlib
             matplotlib.use("TkAgg", force=True)
             from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-            from mpl_toolkits.mplot3d import Axes3D          
+            from mpl_toolkits.mplot3d import Axes3D
             from mpl_toolkits.mplot3d.art3d import Poly3DCollection
         except Exception as exc:
             messagebox.showerror(
@@ -108,8 +129,24 @@ class Viz3DMixin:
         c3 = float(prob.obj_coeffs[2])
         maximize = prob.objective_sense == "max"
         vv = [(x, y, z, c1*x + c2*y + c3*z) for x, y, z in vertices]
-        optimal = (max(vv, key=lambda t: t[3]) if maximize
-                   else min(vv, key=lambda t: t[3])) if vv else None
+
+        # --- Chọn nguồn điểm tối ưu ---
+        if status == "optimal" and report is not None:
+            x1_opt = float(report.solution_orig.get(0, 0))
+            x2_opt = float(report.solution_orig.get(1, 0))
+            x3_opt = float(report.solution_orig.get(2, 0))
+            z_opt  = float(report.objective_orig)
+            optimal = (x1_opt, x2_opt, x3_opt, z_opt)
+        elif status in ("unbounded", "infeasible"):
+            optimal = None
+        else:
+            # Chưa giải hoặc cycle → tự tính như cũ
+            optimal = (max(vv, key=lambda t: t[3]) if maximize
+                       else min(vv, key=lambda t: t[3])) if vv else None
+
+        # Gói thêm thông tin trạng thái để truyền vào panel
+        multiple_optimal = getattr(report, "multiple_optimal", False) \
+            if report is not None else False
 
         win = tk.Toplevel(self)
         win.title("Trực quan hóa bài toán 3 biến — 3D")
@@ -137,20 +174,24 @@ class Viz3DMixin:
         fig = Figure(figsize=(14, 9), dpi=100)
         fig.patch.set_facecolor("#0f172a")
         ax = fig.add_subplot(111, projection="3d")
-        ax.set_facecolor("#0f172a")
+
+        # Nền axes: xám đậm vừa (không đen hoàn toàn) → dễ phân biệt các element
+        ax.set_facecolor("#111827")
         for pane in [ax.xaxis.pane, ax.yaxis.pane, ax.zaxis.pane]:
-            pane.fill = False
-            pane.set_edgecolor("#334155")
-        ax.tick_params(colors="#94a3b8", labelsize=8)
-        ax.xaxis.label.set_color("#94a3b8")
-        ax.yaxis.label.set_color("#94a3b8")
-        ax.zaxis.label.set_color("#94a3b8")
-        ax.set_xlabel("x₁", fontsize=11, labelpad=8)
-        ax.set_ylabel("x₂", fontsize=11, labelpad=8)
-        ax.set_zlabel("x₃", fontsize=11, labelpad=8)
+            pane.fill = True
+            pane.set_facecolor("#1e293b")   # slate-800 — có chiều sâu
+            pane.set_edgecolor("#334155")   # slate-700
+            pane.set_alpha(0.6)
+        ax.tick_params(colors="#94a3b8", labelsize=9)
+        ax.xaxis.label.set_color("#cbd5e1")  # sáng hơn slate-400 → slate-300
+        ax.yaxis.label.set_color("#cbd5e1")
+        ax.zaxis.label.set_color("#cbd5e1")
+        ax.set_xlabel("x₁", fontsize=12, labelpad=10)
+        ax.set_ylabel("x₂", fontsize=12, labelpad=10)
+        ax.set_zlabel("x₃", fontsize=12, labelpad=10)
         ax.set_title(
             "Miền chấp nhận được (3D) & điểm tối ưu",
-            fontsize=13, fontweight="bold", color="#e2e8f0", pad=12
+            fontsize=13, fontweight="bold", color="#f1f5f9", pad=14
         )
 
         self._draw_3d_scene(ax, planes, vertices, vv, optimal, maximize, prob)
@@ -161,7 +202,8 @@ class Viz3DMixin:
         w.configure(bg="#0f172a", highlightthickness=0)
         w.grid(row=0, column=0, sticky="nsew")
 
-        self._build_info_panel_3d(outer, prob, vertices, vv, optimal, maximize)
+        self._build_info_panel_3d(outer, prob, vertices, vv, optimal, maximize,
+                                   status=status, multiple_optimal=multiple_optimal)
 
         ctrl = tk.Frame(win, bg="#1e293b")
         ctrl.grid(row=1, column=0, sticky="ew")
@@ -248,58 +290,112 @@ class Viz3DMixin:
         ax.set_ylim(ylo, yhi)
         ax.set_zlim(zlo, zhi)
 
+        # Palette màu sáng hơn, tương phản tốt trên nền tối
         palette = [
-            "#3b82f6", "#a855f7", "#10b981",
-            "#f59e0b", "#ef4444", "#06b6d4",
-            "#ec4899", "#84cc16",
+            "#60a5fa",  # blue-400
+            "#c084fc",  # purple-400
+            "#34d399",  # emerald-400
+            "#fbbf24",  # amber-400
+            "#f87171",  # red-400
+            "#22d3ee",  # cyan-400
+            "#f472b6",  # pink-400
+            "#a3e635",  # lime-400
         ]
         hp = [(p[0], p[1], p[2], p[3], p[4]) for p in planes]
 
-        if vertices and len(vertices) >= 3:
+        # ---- Polytope (convex hull) ----
+        if vertices and len(vertices) >= 4:
             try:
                 from scipy.spatial import ConvexHull
                 arr = np.array(vertices)
                 hull = ConvexHull(arr)
                 faces = [arr[s] for s in hull.simplices]
                 poly = Poly3DCollection(
-                    faces, alpha=0.18, linewidth=0.6,
-                    facecolor="#93c5fd", edgecolor="#3b82f6"
+                    faces, alpha=0.22, linewidth=0.5,
+                    facecolor="#bfdbfe",   # blue-200 — sáng hơn, rõ hơn
+                    edgecolor="#93c5fd"    # blue-300
+                )
+                ax.add_collection3d(poly)
+            except Exception:
+                pass
+        elif vertices and len(vertices) == 3:
+            # Polytope phẳng (3 đỉnh đồng phẳng) — vẽ tam giác trực tiếp
+            try:
+                face = [np.array(vertices)]
+                poly = Poly3DCollection(
+                    face, alpha=0.30, linewidth=0.8,
+                    facecolor="#bfdbfe", edgecolor="#60a5fa"
                 )
                 ax.add_collection3d(poly)
             except Exception:
                 pass
 
+        # ---- Mặt phẳng ràng buộc ----
         for idx, (a, b, c, d, sense, label) in enumerate(planes):
             color = palette[idx % len(palette)]
             self._draw_plane_patch(ax, a, b, c, d, color,
                                    xlo, xhi, ylo, yhi, zlo, zhi, label, idx)
+
+        # ---- Đỉnh khả thi ----
         if vertices:
             xs_v = [p[0] for p in vertices]
             ys_v = [p[1] for p in vertices]
             zs_v = [p[2] for p in vertices]
             ax.scatter(xs_v, ys_v, zs_v,
-                       s=48, c="#60a5fa", edgecolors="white",
-                       linewidths=0.8, zorder=5, depthshade=True,
+                       s=55, c="#93c5fd",        # blue-300 — nổi hơn trên nền tối
+                       edgecolors="#1e3a5f",
+                       linewidths=0.8, zorder=5, depthshade=False,
                        label="Đỉnh khả thi")
-
             for idx2, (x, y, z, val) in enumerate(vv, start=1):
-                ax.text(x, y, z,
-                        f" {idx2}", fontsize=8, color="#e2e8f0",
+                ax.text(x, y, z, f" {idx2}", fontsize=8, color="#e2e8f0",
                         bbox=dict(boxstyle="round,pad=0.15",
-                                  fc="#1e3a5f", ec="#3b82f6", alpha=0.85))
+                                  fc="#1e3a5f", ec="#60a5fa", alpha=0.88))
 
+        # ---- Điểm / đoạn tối ưu ----
         if optimal is not None:
             bx, by, bz, bval = optimal
-            ax.scatter([bx], [by], [bz],
-                       s=260, marker="*", c="#f59e0b",
-                       edgecolors="#fbbf24", linewidths=1.2,
-                       zorder=10, depthshade=False, label="Điểm tối ưu")
-            ax.text(bx, by, bz,
-                    f"  ★ tối ưu\n  ({bx:.3g}, {by:.3g}, {bz:.3g})\n  z={bval:.3g}",
-                    fontsize=9, fontweight="bold", color="#fbbf24",
-                    bbox=dict(boxstyle="round,pad=0.3",
-                              fc="#1c1917", ec="#f59e0b", alpha=0.96))
+            tol_z = max(1e-6, abs(bval) * 1e-6)
+            opt_verts = [(x, y, z) for x, y, z, v in vv if abs(v - bval) <= tol_z]
 
+            if len(opt_verts) >= 2:
+                # Vô số nghiệm: highlight tất cả đỉnh tối ưu + nối bằng đường vàng
+                oxs = [p[0] for p in opt_verts]
+                oys = [p[1] for p in opt_verts]
+                ozs = [p[2] for p in opt_verts]
+                # Đường nối
+                for i in range(len(opt_verts)):
+                    for j in range(i + 1, len(opt_verts)):
+                        ax.plot([opt_verts[i][0], opt_verts[j][0]],
+                                [opt_verts[i][1], opt_verts[j][1]],
+                                [opt_verts[i][2], opt_verts[j][2]],
+                                color="#fbbf24", linewidth=3.5,
+                                alpha=0.95, zorder=9)
+                # Ngôi sao ở các đỉnh tối ưu
+                ax.scatter(oxs, oys, ozs,
+                           s=320, marker="*", c="#fbbf24",
+                           edgecolors="#f59e0b", linewidths=1.2,
+                           zorder=10, depthshade=False,
+                           label="Đỉnh tối ưu (vô số nghiệm)")
+                # Nhãn tại đỉnh đầu tiên
+                ax.text(bx, by, bz,
+                        f"  ★ vô số nghiệm\n  z* = {bval:.4g}",
+                        fontsize=9, fontweight="bold", color="#fbbf24",
+                        bbox=dict(boxstyle="round,pad=0.3",
+                                  fc="#1c1917", ec="#fbbf24", alpha=0.96))
+            else:
+                # Một điểm tối ưu duy nhất
+                ax.scatter([bx], [by], [bz],
+                           s=300, marker="*", c="#fbbf24",
+                           edgecolors="#f59e0b", linewidths=1.2,
+                           zorder=10, depthshade=False,
+                           label="Điểm tối ưu")
+                ax.text(bx, by, bz,
+                        f"  ★ tối ưu\n  ({bx:.3g}, {by:.3g}, {bz:.3g})\n  z={bval:.4g}",
+                        fontsize=9, fontweight="bold", color="#fbbf24",
+                        bbox=dict(boxstyle="round,pad=0.3",
+                                  fc="#1c1917", ec="#fbbf24", alpha=0.96))
+
+        # ---- Mũi tên hướng tối ưu ----
         c1 = float(prob.obj_coeffs[0])
         c2 = float(prob.obj_coeffs[1])
         c3 = float(prob.obj_coeffs[2])
@@ -312,12 +408,14 @@ class Viz3DMixin:
             sign = 1 if maximize else -1
             dx, dy, dz = sign*c1*scale, sign*c2*scale, sign*c3*scale
             ax.quiver(cx, cy, cz, dx, dy, dz,
-                      color="#f87171", linewidth=2.2, arrow_length_ratio=0.25,
+                      color="#fb923c", linewidth=2.2,   # orange-400 — rõ hơn đỏ
+                      arrow_length_ratio=0.28,
                       label="Hướng tối ưu hóa")
 
-        leg = ax.legend(loc="upper left", fontsize=8,
-                        facecolor="#1e293b", edgecolor="#334155",
-                        labelcolor="#e2e8f0", framealpha=0.85)
+        # ---- Legend ----
+        ax.legend(loc="upper left", fontsize=8,
+                  facecolor="#1e293b", edgecolor="#475569",
+                  labelcolor="#e2e8f0", framealpha=0.90)
 
     def _draw_plane_patch(self, ax, a, b, c, d, color,
                           xlo, xhi, ylo, yhi, zlo, zhi,
@@ -361,15 +459,28 @@ class Viz3DMixin:
                     return
                 X = np.clip(X, xlo, xhi)
 
-            ax.plot_surface(X, Y, Z, alpha=0.08, color=color,
+            ax.plot_surface(X, Y, Z, alpha=0.14, color=color,
                             linewidth=0, antialiased=True, zorder=1)
 
+            # Vẽ viền cạnh cho cả 3 nhánh (trước chỉ có nhánh c lớn)
             if abs(c) > max(abs(a), abs(b)) * 0.5:
                 for xi in [xlo, xhi]:
                     ys2 = np.linspace(ylo, yhi, 30)
                     zs2 = np.clip((d - a * xi - b * ys2) / c, zlo, zhi)
                     ax.plot([xi]*30, ys2, zs2, color=color,
-                            linewidth=1.4, alpha=0.75)
+                            linewidth=1.6, alpha=0.85)
+            elif abs(b) > abs(a) * 0.5:
+                for zi in [zlo, zhi]:
+                    xs2 = np.linspace(xlo, xhi, 30)
+                    ys2 = np.clip((d - a * xs2 - c * zi) / b, ylo, yhi)
+                    ax.plot(xs2, ys2, [zi]*30, color=color,
+                            linewidth=1.6, alpha=0.85)
+            else:
+                for zi in [zlo, zhi]:
+                    ys2 = np.linspace(ylo, yhi, 30)
+                    xs2 = np.clip((d - b * ys2 - c * zi) / a, xlo, xhi)
+                    ax.plot(xs2, ys2, [zi]*30, color=color,
+                            linewidth=1.6, alpha=0.85)
             xm = (xlo + xhi) / 2
             ym = (ylo + yhi) / 2
             if abs(c) > 1e-10:
@@ -391,7 +502,8 @@ class Viz3DMixin:
         except Exception:
             pass
 
-    def _build_info_panel_3d(self, parent, prob, vertices, vv, optimal, maximize):
+    def _build_info_panel_3d(self, parent, prob, vertices, vv, optimal, maximize,
+                              status=None, multiple_optimal=False):
         mode = self.data_mode.get()
 
         panel = tk.Frame(parent, bg="#1e293b", width=280,
@@ -426,6 +538,14 @@ class Viz3DMixin:
         lbl(f"Số ràng buộc: {len(prob.constraints)}", fg="#94a3b8")
         lbl(f"Số đỉnh khả thi: {len(vertices)}", fg="#94a3b8")
 
+        # Trạng thái từ engine (nếu có)
+        if status == "unbounded":
+            lbl("Trạng thái: Không giới nội", fg="#f87171")
+        elif status == "infeasible":
+            lbl("Trạng thái: Vô nghiệm", fg="#f87171")
+        elif status == "optimal" and multiple_optimal:
+            lbl("Trạng thái: Vô số nghiệm tối ưu", fg="#fbbf24")
+
         tk.Frame(panel, bg="#334155", height=1).pack(fill="x", padx=8, pady=4)
         lbl("Ràng buộc:", fg="#94a3b8", font=("Segoe UI", 8))
         for i, cons in enumerate(prob.constraints, start=1):
@@ -440,20 +560,46 @@ class Viz3DMixin:
             tk.Frame(panel, bg="#334155", height=1).pack(fill="x", padx=8, pady=4)
             lbl("Đỉnh khả thi (Z):", fg="#94a3b8", font=("Segoe UI", 8))
             ordered = sorted(vv, key=lambda t: t[3], reverse=maximize)
+            # Xác định các đỉnh tối ưu để highlight
+            opt_z = ordered[0][3] if ordered else None
+            tol_z = max(1e-6, abs(opt_z) * 1e-6) if opt_z is not None else 1e-6
             for idx, (x, y, z, val) in enumerate(ordered, start=1):
-                lbl(f"  {idx}. ({x:.3g}, {y:.3g}, {z:.3g})  z={val:.3g}",
-                    fg="#e2e8f0", font=("Consolas", 8))
+                is_opt = (opt_z is not None and abs(val - opt_z) <= tol_z
+                          and optimal is not None)
+                fg_col = "#fbbf24" if is_opt else "#e2e8f0"
+                mark = " ★" if is_opt else ""
+                lbl(f"  {idx}. ({x:.3g}, {y:.3g}, {z:.3g})  z={val:.3g}{mark}",
+                    fg=fg_col, font=("Consolas", 8))
 
         if optimal is not None:
             tk.Frame(panel, bg="#334155", height=1).pack(fill="x", padx=8, pady=4)
             bx, by, bz, bv = optimal
-            lbl("Điểm tối ưu:", fg="#fbbf24", font=("Segoe UI", 9, "bold"))
-            lbl(f"  ({bx:.4g}, {by:.4g}, {bz:.4g})",
-                fg="#fbbf24", font=("Consolas", 9))
-            lbl(f"  Z = {bv:.4g}", fg="#fbbf24", font=("Consolas", 9))
+            src = "(Simplex)" if status == "optimal" else "(Vertex enum)"
+
+            # Tìm tất cả đỉnh có Z = Z*
+            tol_z = max(1e-6, abs(bv) * 1e-6)
+            opt_verts = [(x, y, z) for x, y, z, v in vv if abs(v - bv) <= tol_z]
+
+            if len(opt_verts) >= 2 and multiple_optimal:
+                lbl(f"Vô số nghiệm tối ưu {src}:",
+                    fg="#fbbf24", font=("Segoe UI", 9, "bold"))
+                lbl(f"  z* = {bv:.4g}", fg="#fbbf24", font=("Consolas", 9))
+                for vi, (vx, vy, vz) in enumerate(opt_verts, start=1):
+                    lbl(f"  Đỉnh {vi}: ({vx:.4g}, {vy:.4g}, {vz:.4g})",
+                        fg="#fcd34d", font=("Consolas", 8))
+                lbl("  Đoạn nối các đỉnh ★ đều tối ưu.",
+                    fg="#94a3b8", font=("Segoe UI", 8))
+            else:
+                lbl(f"Điểm tối ưu {src}:", fg="#fbbf24", font=("Segoe UI", 9, "bold"))
+                lbl(f"  ({bx:.4g}, {by:.4g}, {bz:.4g})",
+                    fg="#fbbf24", font=("Consolas", 9))
+                lbl(f"  Z = {bv:.4g}", fg="#fbbf24", font=("Consolas", 9))
+        elif status == "unbounded":
+            lbl("Không có điểm tối ưu hữu hạn.", fg="#f87171", font=("Segoe UI", 9))
+        elif status == "infeasible":
+            lbl("Miền khả thi rỗng.", fg="#f87171", font=("Segoe UI", 9))
         else:
-            lbl("Không tìm thấy đỉnh khả thi.",
-                fg="#f87171", font=("Segoe UI", 9))
+            lbl("Không tìm thấy đỉnh khả thi.", fg="#f87171", font=("Segoe UI", 9))
 
         tk.Frame(panel, bg="#334155", height=1).pack(fill="x", padx=8, pady=4)
         lbl("Xoay: kéo chuột trái\n   Zoom: lăn chuột\n   Pan: kéo chuột phải",
