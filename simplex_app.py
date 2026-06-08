@@ -1,16 +1,14 @@
 from __future__ import annotations
 
 import math
-import os
 import tkinter as tk
-import webbrowser
 from fractions import Fraction
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 from typing import Any, Dict, List, Optional, Tuple
 
 from models import ProblemData, SolveReport
+from models import Snapshot, PivotStep, SolveTrace 
 from simplex_engine import SimplexEngine
-from html_exporter import export_report_html
 from utils import (VAR_SIGNS, SENSES, clean_number_text, fmt_num,
                    fr, parse_cell, row_expr, sense_to_standard, term_str)
 from viz3d import Viz3DMixin
@@ -28,7 +26,7 @@ class SimplexApp(Viz3DMixin, tk.Tk):
         self.n_vars = tk.IntVar(value=2)
         self.n_constraints = tk.IntVar(value=3)
         self.data_mode = tk.StringVar(value="Phân số")
-        self.method_preference = tk.StringVar(value="Dantzig Simplex")
+        self.method_preference = tk.StringVar(value="auto")
         self.demo_preset_var = tk.StringVar(value="Ví dụ giải bằng 2 pha")
         self.need_aux_phase1 = False # cờ cho biết có cần biến phụ để giải pha 1 hay không
         self.phase1_aux_var_index: Optional[int] = None # chỉ số của biến phụ nếu cần thiết
@@ -44,7 +42,6 @@ class SimplexApp(Viz3DMixin, tk.Tk):
         self.last_report: Optional[SolveReport] = None
         self.last_problem: Optional[ProblemData] = None
         self.export_btn: Optional[tk.Button] = None
-        self.html_btn: Optional[tk.Button] = None
         self.viz_btn: Optional[tk.Button] = None
         self.viz3d_btn: Optional[tk.Button] = None
 
@@ -221,17 +218,16 @@ class SimplexApp(Viz3DMixin, tk.Tk):
                    command=self._build_inputs).grid(
             row=3, column=0, columnspan=2, sticky="ew", pady=(10, 0))
 
-        # Hàng nút xuất file + HTML + trực quan hóa
+        # Hàng nút xuất file + trực quan hóa
         action_row = ttk.Frame(config)
         action_row.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(8, 0))
         action_row.columnconfigure(0, weight=1)
         action_row.columnconfigure(1, weight=1)
-        action_row.columnconfigure(2, weight=1)
 
         # Nút "Xuất file .txt": ban đầu bị vô hiệu hóa (xám); chỉ sáng lên sau khi giải xong
         self.export_btn = tk.Button(
             action_row,
-            text="📄  Xuất .txt",
+            text="📄  Xuất file .txt",
             font=("Segoe UI", 9, "bold"),
             bg="#CBD5E1", fg="white",
             activebackground="#94A3B8", activeforeground="white",
@@ -239,33 +235,16 @@ class SimplexApp(Viz3DMixin, tk.Tk):
             cursor="arrow", state=tk.DISABLED,
             command=self.export_solution_txt,
         )
-        self.export_btn.grid(row=0, column=0, sticky="ew", padx=(0, 3))
+        self.export_btn.grid(row=0, column=0, sticky="ew", padx=(0, 4))
         self.export_btn.bind("<Enter>",
                              lambda e: self._on_button_enter(e, "#2563EB"))
         self.export_btn.bind("<Leave>",
                              lambda e: self._on_button_leave(e, "#CBD5E1"))
 
-        # Nút "Xem HTML (KaTeX)": xuất lời giải đẹp ra trình duyệt
-        self.html_btn = tk.Button(
-            action_row,
-            text="🌐  Xem HTML",
-            font=("Segoe UI", 9, "bold"),
-            bg="#CBD5E1", fg="white",
-            activebackground="#94A3B8", activeforeground="white",
-            relief="flat", bd=0, padx=6, pady=7,
-            cursor="arrow", state=tk.DISABLED,
-            command=self.open_solution_html,
-        )
-        self.html_btn.grid(row=0, column=1, sticky="ew", padx=(0, 3))
-        self.html_btn.bind("<Enter>",
-                           lambda e: self._on_button_enter(e, "#0F766E"))
-        self.html_btn.bind("<Leave>",
-                           lambda e: self._on_button_leave(e, "#CBD5E1"))
-
         # Nút "Trực quan hóa (2D/3D)": luôn hiển thị, nhưng đổi nhãn/màu theo số biến
         self.viz_btn = tk.Button(
             action_row,
-            text="📊  Trực quan",
+            text="📊  Trực quan hóa (2D)",
             font=("Segoe UI", 9, "bold"),
             bg="#6EBF8B", fg="white",
             activebackground="#4DAA72", activeforeground="white",
@@ -273,7 +252,7 @@ class SimplexApp(Viz3DMixin, tk.Tk):
             cursor="hand2",
             command=self._viz_dispatch,
         )
-        self.viz_btn.grid(row=0, column=2, sticky="ew")
+        self.viz_btn.grid(row=0, column=1, sticky="ew")
         self.viz_btn.bind("<Enter>",
                           lambda e: self._on_button_enter(e, None))
         self.viz_btn.bind("<Leave>",
@@ -281,28 +260,10 @@ class SimplexApp(Viz3DMixin, tk.Tk):
 
         self.viz3d_btn = None
 
-        method_box = ttk.Labelframe(config, text="Phương pháp giải", padding=10)
-        method_box.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(10, 0))
-        method_box.columnconfigure(1, weight=1)
-        ttk.Label(method_box, text="Chọn phương pháp:").grid(row=0, column=0, sticky="w", padx=(0, 8))
-        method_combo = ttk.Combobox(
-            method_box,
-            textvariable=self.method_preference,
-            values=["Dantzig Simplex", "Bland's Rule"],
-            state="readonly",
-            width=18,
-        )
-        method_combo.grid(row=0, column=1, sticky="ew")
-        ttk.Label(
-            method_box,
-            text="Dantzig dừng khi phát hiện xoay vòng; Bland dùng để tránh lặp.",
-            foreground="#64748B",
-        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(6, 0))
-
         ttk.Button(config, text="Chạy giải thuật  (Ctrl+Alt+R)",
                    style="Accent.TButton",
                    command=self.run_solver).grid(
-            row=6, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+            row=5, column=0, columnspan=2, sticky="ew", pady=(10, 0))
 
         btns = ttk.Frame(left)
         btns.grid(row=1, column=0, sticky="ew", pady=(10, 10))
@@ -608,27 +569,23 @@ class SimplexApp(Viz3DMixin, tk.Tk):
 
 
     def _set_solution_available(self, available: bool) -> None:
-        # Bật/tắt nút "Xuất file .txt" và "Xem HTML" tùy theo có kết quả giải hay chưa.
-        for btn, hover_color, base_color in [
-            (self.export_btn, "#2563EB", "#3B82F6"),
-            (self.html_btn,   "#0F766E", "#0D9488"),
-        ]:
-            if btn is None:
-                continue
-            if available:
-                btn._base_bg = base_color
-                btn._hover_bg = hover_color
-                btn.config(state=tk.NORMAL,
-                           bg=base_color,
-                           activebackground=hover_color,
-                           cursor="hand2")
-            else:
-                btn._base_bg = "#CBD5E1"
-                btn._hover_bg = "#94A3B8"
-                btn.config(state=tk.DISABLED,
-                           bg="#CBD5E1",
-                           activebackground="#94A3B8",
-                           cursor="arrow")
+        # Bật/tắt nút "Xuất file .txt" tùy theo có kết quả giải hay chưa.
+        if self.export_btn is None:
+            return
+        if available:
+            self.export_btn._base_bg = "#3B82F6"
+            self.export_btn._hover_bg = "#2563EB"
+            self.export_btn.config(state=tk.NORMAL,
+                                   bg="#3B82F6",
+                                   activebackground="#2563EB",
+                                   cursor="hand2")
+        else:
+            self.export_btn._base_bg = "#CBD5E1"
+            self.export_btn._hover_bg = "#94A3B8"
+            self.export_btn.config(state=tk.DISABLED,
+                                   bg="#CBD5E1",
+                                   activebackground="#94A3B8",
+                                   cursor="arrow")
 
     # Bảng màu và nhãn nút trực quan hóa theo số biến:
     #   2 biến → nút xanh sage "Nordic Frost" "Trực quan hóa (2D)"
@@ -676,11 +633,13 @@ class SimplexApp(Viz3DMixin, tk.Tk):
         #   2 biến → vẽ đồ thị 2D miền chấp nhận + đường đồng mức
         #   3 biến → vẽ mô hình 3D (Viz3DMixin)
         #   khác  → thông báo không hỗ trợ
+        # Truyền last_report vào viz để dùng trạng thái và nghiệm từ engine
+        # thay vì tự tính lại (sửa lỗi unbounded/infeasible báo sai).
         n = int(self.n_vars.get())
         if n == 2:
-            self.visualize_two_variable_problem()
+            self.visualize_two_variable_problem(report=self.last_report)
         elif n == 3:
-            self.visualize_three_variable_problem()
+            self.visualize_three_variable_problem(report=self.last_report)
         else:
             messagebox.showinfo(
                 "Trực quan hóa",
@@ -709,15 +668,6 @@ class SimplexApp(Viz3DMixin, tk.Tk):
         btn.config(bg=original_color)
 
 
-    def _normalize_method_choice(self, choice: Optional[str]) -> str:
-        # Chuẩn hóa lựa chọn từ dropdown thành khóa nội bộ của solver.
-        value = (choice or "").strip().lower()
-        if value in {"dantzig simplex", "dantzig", "d"}:
-            return "dantzig"
-        if value in {"bland's rule", "bland", "blands rule", "bland rule"}:
-            return "bland"
-        raise ValueError("Phương pháp giải không hợp lệ. Hãy chọn Dantzig Simplex hoặc Bland's Rule.")
-
     def export_solution_txt(self) -> None:
         # Xuất nội dung vùng lời giải ra file .txt.
         content = self.output.get("1.0", "end-1c").strip()
@@ -738,22 +688,6 @@ class SimplexApp(Viz3DMixin, tk.Tk):
             self.status_var.set(f"Đã xuất file: {path}")
         except Exception as exc:
             messagebox.showerror("Lỗi xuất file", str(exc))
-
-    def open_solution_html(self) -> None:
-        """Xuất lời giải đầy đủ ra HTML+KaTeX và mở trong trình duyệt mặc định."""
-        if self.last_report is None:
-            messagebox.showinfo("Xem HTML", "Chưa có lời giải. Vui lòng chạy giải thuật trước.")
-            return
-        try:
-            self.status_var.set("Đang tạo file HTML…")
-            self.update_idletasks()
-            path = export_report_html(self.last_report, self.data_mode.get())
-            url = f"file:///{path.replace(os.sep, '/')}"
-            webbrowser.open(url)
-            self.status_var.set(f"Đã mở trình duyệt: {os.path.basename(path)}")
-        except Exception as exc:
-            messagebox.showerror("Lỗi xuất HTML", str(exc))
-            self.status_var.set("Lỗi khi tạo file HTML.")
 
 
     def _boundary_text(self, coeffs, sense: str, rhs: Fraction) -> str:
@@ -801,6 +735,7 @@ class SimplexApp(Viz3DMixin, tk.Tk):
 
     def _compute_feasible_vertices(self, halfplanes):
         # Tính tất cả đỉnh của miền chấp nhận được bằng cách giao từng cặp đường thẳng, sau đó lọc lại chỉ giữ các giao điểm thỏa toàn bộ ràng buộc còn lại.
+        import math
         lines = [(a, b, c, lbl) for a, b, c, _, lbl in halfplanes]
         vertices = []
         for i in range(len(lines)):
@@ -867,6 +802,88 @@ class SimplexApp(Viz3DMixin, tk.Tk):
         return max(vertex_values, key=lambda t: t[2]) if maximize \
                else min(vertex_values, key=lambda t: t[2])
 
+    def _compute_second_optimal_vertex(self, report):
+        # Tính đỉnh thứ hai của đoạn nghiệm tối ưu khi vô số nghiệm (2 biến).
+        # Ý tưởng: từ final_snapshot, tăng biến tự do (hệ số 0 trong obj) đến θ_max
+        # → ra một đỉnh cơ sở mới cùng Z*. Quy về biến gốc qua variable_mapping.
+        if not report or not report.multiple_optimal:
+            return None
+        free_vars = report.multiple_optimal_vars or []
+        if not free_vars:
+            return None
+        engine = report.engine
+        snap = (report.phase2_trace.final_snapshot
+                if report.phase2_trace and report.phase2_trace.final_snapshot
+                else report.dantzig.final_snapshot)
+        if snap is None:
+            return None
+        fv = free_vars[0]
+        # Tìm θ_max: tỉ số nhỏ nhất dương — bao xa biến fv có thể tăng
+        theta = None
+        for i, row in enumerate(snap.rows):
+            a = row.get(fv, Fraction(0))
+            if a < 0:
+                t = snap.rhs[i] / (-a)
+                if t > Fraction(0) and (theta is None or t < theta):
+                    theta = t
+        if theta is None or theta <= 0:
+            return None
+        # Giá trị biến chuẩn hóa tại đỉnh thứ hai
+        std_val = {i: Fraction(0) for i in range(len(engine.std_names))}
+        for i, b in enumerate(snap.basis):
+            if b < len(engine.std_names):
+                std_val[b] = snap.rhs[i]
+        std_val[fv] = theta
+        for i, row in enumerate(snap.rows):
+            a = row.get(fv, Fraction(0))
+            if a != 0:
+                b = snap.basis[i]
+                if b < len(engine.std_names):
+                    std_val[b] = snap.rhs[i] + a * theta
+        # Quy về biến gốc
+        orig = {}
+        for orig_idx, mapping in enumerate(engine.variable_mapping):
+            val = Fraction(0)
+            for k, coef in mapping:
+                val += coef * std_val.get(k, Fraction(0))
+            orig[orig_idx] = val
+        if len(orig) < 2:
+            return None
+        x1 = float(orig.get(0, 0))
+        x2 = float(orig.get(1, 0))
+        z  = float(report.objective_orig)
+        return (x1, x2, z)
+
+    def _plot_optimal_segment(self, ax, pt1, pt2, z_star):
+        # Vẽ đoạn thẳng vàng nối hai đỉnh tối ưu, kèm sao ở hai đầu.
+        if pt1 is None or pt2 is None:
+            return
+        x1, y1, _ = pt1
+        x2, y2, _ = pt2
+        ax.plot([x1, x2], [y1, y2],
+                color="#F59E0B", linewidth=3.5,
+                solid_capstyle="round", zorder=7,
+                label="Đoạn nghiệm tối ưu")
+        ax.scatter([x1, x2], [y1, y2],
+                   s=200, marker="*", color="#F59E0B",
+                   edgecolors="#1E3A5F", linewidths=1.2, zorder=8)
+        mx, my = (x1 + x2) / 2, (y1 + y2) / 2
+        mode = self.data_mode.get()
+        try:
+            z_str = fmt_num(Fraction(str(round(z_star, 10))), mode)
+        except Exception:
+            z_str = f"{z_star:.4g}"
+        ax.annotate(
+            f"Vô số nghiệm tối ưu\nz* = {z_str}\n"
+            f"A=({x1:.3g}, {y1:.3g})\nB=({x2:.3g}, {y2:.3g})",
+            xy=(mx, my), xytext=(16, 16), textcoords="offset points",
+            fontsize=9, fontweight="bold",
+            bbox=dict(boxstyle="round,pad=0.35",
+                      fc="#FEF9C3", ec="#F59E0B", alpha=0.98),
+            arrowprops=dict(arrowstyle="->", color="#D97706", lw=1.5),
+            zorder=9
+        )
+
     def _request_canvas_redraw(self, canvas, delay_ms=14):
         # Đặt lịch vẽ lại canvas sau delay_ms mili-giây bằng widget.after().
         widget = canvas.get_tk_widget()
@@ -897,595 +914,425 @@ class SimplexApp(Viz3DMixin, tk.Tk):
             add(((fc-fb*ymin)/fa, ymin)); add(((fc-fb*ymax)/fa, ymax))
         return pts
 
-
-    def visualize_two_variable_problem(self) -> None:
-        # Mở cửa sổ trực quan hóa 2 biến với giao diện đồng bộ phong cách 3D:
-        #   - nền tối, khung nội dung lớn
-        #   - bảng thông tin nổi ở góc phải
-        #   - thanh điều khiển ở dưới
-        #   - giữ nguyên đầy đủ chức năng pan / zoom / reset
+    def visualize_two_variable_problem(self, report=None) -> None:
+        # Mở cửa sổ trực quan hóa đầy đủ cho bài toán 2 biến.
+        # report (SolveReport | None): nếu có, dùng status và nghiệm từ engine
+        #   thay vì tự tính lại — sửa đúng lỗi unbounded/infeasible báo sai.
+        #   Nếu None (chưa giải), fallback về vertex enumeration như cũ.
         try:
             prob = self._collect_problem()
         except Exception as exc:
-            messagebox.showerror("Trực quan hóa", str(exc))
-            return
+            messagebox.showerror("Trực quan hóa", str(exc)); return
         if len(prob.obj_coeffs) != 2:
+            messagebox.showinfo("Trực quan hóa",
+                "Tính năng này chỉ hỗ trợ đúng 2 biến x₁ và x₂."); return
+
+        # --- Kiểm tra trạng thái từ engine trước khi làm gì cả ---
+        status = report.status if report is not None else None
+        if status == "infeasible":
             messagebox.showinfo(
                 "Trực quan hóa",
-                "Tính năng này chỉ hỗ trợ đúng 2 biến x₁ và x₂."
+                "Bài toán vô nghiệm — miền khả thi rỗng.\n"
+                "Sẽ vẽ các đường ràng buộc nhưng không có miền tô màu."
             )
-            return
+        elif status == "unbounded":
+            messagebox.showwarning(
+                "Trực quan hóa",
+                "Bài toán không giới nội — hàm mục tiêu tiến đến vô cực.\n"
+                "Sẽ vẽ miền khả thi nhưng không đánh dấu điểm tối ưu."
+            )
 
         try:
-            import numpy as np
-            import matplotlib
+            import numpy as np, matplotlib
             matplotlib.use("TkAgg", force=True)
             from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
         except Exception as exc:
-            messagebox.showerror(
-                "Trực quan hóa",
-                f"Không khởi tạo được thư viện: {exc}"
-            )
-            return
+            messagebox.showerror("Trực quan hóa",
+                f"Không khởi tạo được thư viện: {exc}"); return
 
         halfplanes = self._build_halfplanes(prob)
-        vertices = self._deduplicate_points(self._compute_feasible_vertices(halfplanes))
+        vertices = self._deduplicate_points(
+            self._compute_feasible_vertices(halfplanes))
         xmin, xmax, ymin, ymax = self._compute_plot_bounds(vertices, halfplanes)
         _, _, X, Y = self._create_meshgrid(xmin, xmax, ymin, ymax)
         feasible_mask = self._compute_feasible_region(halfplanes, X, Y)
-
         c1, c2 = float(prob.obj_coeffs[0]), float(prob.obj_coeffs[1])
-        vertex_values = [(p[0], p[1], c1 * p[0] + c2 * p[1]) for p in vertices]
+        vertex_values = [(p[0], p[1], c1*p[0]+c2*p[1]) for p in vertices]
         maximize = prob.objective_sense == "max"
-        optimal_point = self._find_optimal_vertex(vertex_values, maximize)
+
+        # --- Chọn nguồn điểm tối ưu ---
+        if status == "optimal" and report is not None:
+            # Dùng nghiệm chính xác từ engine (xử lý đúng biến tự do/âm)
+            x1_opt = float(report.solution_orig.get(0, 0))
+            x2_opt = float(report.solution_orig.get(1, 0))
+            z_opt  = float(report.objective_orig)
+            optimal_point = (x1_opt, x2_opt, z_opt)
+            # Tính đỉnh thứ hai nếu vô số nghiệm
+            second_optimal = self._compute_second_optimal_vertex(report) \
+                if report.multiple_optimal else None
+        elif status in ("unbounded", "infeasible"):
+            # Không có điểm tối ưu hữu hạn
+            optimal_point = None
+            second_optimal = None
+        else:
+            # Chưa giải (report=None) hoặc cycle → tự tính như cũ
+            optimal_point = self._find_optimal_vertex(vertex_values, maximize)
+            second_optimal = None
+
+        # --- Xây dựng z_best cho đường đồng mức ---
+        # Nếu có nghiệm từ engine thì dùng, tránh tính sai khi unbounded
+        z_best_override = float(report.objective_orig) \
+            if (status == "optimal" and report is not None) else None
 
         win = self._create_visualization_window()
-        outer = tk.Frame(win, bg="#0f172a")
-        outer.grid(row=0, column=0, sticky="nsew")
-        outer.rowconfigure(0, weight=1)
-        outer.columnconfigure(0, weight=1)
-
-        canvas_host = tk.Frame(outer, bg="#0f172a")
-        canvas_host.grid(row=0, column=0, sticky="nsew")
-        canvas_host.rowconfigure(0, weight=1)
-        canvas_host.columnconfigure(0, weight=1)
+        pf = tk.Frame(win, bg="#F0F4F8", bd=0, highlightthickness=0)
+        pf.grid(row=0, column=0, sticky="nsew")
+        pf.rowconfigure(0, weight=1); pf.columnconfigure(0, weight=1)
 
         fig, ax = self._create_figure()
         self._plot_feasible_region(ax, X, Y, feasible_mask)
         self._plot_constraints(ax, halfplanes, xmin, xmax, ymin, ymax)
         self._plot_objective_contours(ax, c1, c2, vertex_values,
-                                      xmin, xmax, ymin, ymax, maximize)
+                                      xmin, xmax, ymin, ymax, maximize,
+                                      z_best_override=z_best_override)
         self._plot_vertices(ax, vertex_values, maximize)
-        self._plot_optimal_point(ax, optimal_point, maximize)
+        # Vẽ đoạn tối ưu (vô số nghiệm) hoặc điểm tối ưu đơn
+        if second_optimal is not None:
+            self._plot_optimal_segment(ax, optimal_point, second_optimal,
+                                       float(report.objective_orig))
+        else:
+            self._plot_optimal_point(ax, optimal_point, maximize)
+        # Vẽ mũi tên hướng tối ưu nếu bài toán không giới nội
+        if status == "unbounded":
+            self._plot_unbounded_arrow(ax, c1, c2, maximize,
+                                       xmin, xmax, ymin, ymax)
         self._configure_axes(ax, xmin, xmax, ymin, ymax)
 
-        canvas = FigureCanvasTkAgg(fig, master=canvas_host)
+        canvas = FigureCanvasTkAgg(fig, master=pf)
         canvas.draw()
-        canvas_widget = canvas.get_tk_widget()
-        canvas_widget.configure(bg="#0f172a", highlightthickness=0, bd=0)
-        canvas_widget.grid(row=0, column=0, sticky="nsew")
-
-        self._create_info_panel(canvas_host, prob, vertices, vertex_values,
-                                 optimal_point, maximize)
-        self._create_zoom_controls(outer, ax, canvas, (xmin, xmax), (ymin, ymax))
+        canvas.get_tk_widget().configure(bd=0, highlightthickness=0,
+                                         relief="flat")
+        canvas.get_tk_widget().pack(fill="both", expand=True)
+        self._create_info_panel(pf, prob, vertices, vertex_values,
+                                 optimal_point, maximize, status=status,
+                                 multiple_optimal=getattr(report, "multiple_optimal", False)
+                                     if report else False,
+                                 second_optimal=second_optimal)
+        self._create_zoom_controls(pf, ax, canvas,
+                                   (xmin, xmax), (ymin, ymax))
         self._enable_canvas_interactions(ax, canvas)
         win.focus_force()
 
-
     def _create_visualization_window(self):
-        # Tạo cửa sổ Toplevel riêng biệt cho trực quan hóa với giao diện tối, đồng bộ 2D/3D.
+        # Tạo cửa sổ Toplevel riêng biệt cho trực quan hóa (fullscreen nếu có thể).
         top = tk.Toplevel(self)
-        top.title("Trực quan hóa bài toán 2 biến — 2D")
-        top.geometry("1540x980")
-        top.minsize(1100, 760)
+        top.title("Trực quan hóa bài toán 2 biến")
+        top.geometry("1540x980"); top.minsize(1100, 760)
         top.resizable(True, True)
-        try:
-            top.state("zoomed")
+        try: top.state("zoomed")
         except Exception:
-            try:
-                top.attributes("-zoomed", True)
-            except Exception:
-                pass
-        top.configure(bg="#0f172a")
-        top.columnconfigure(0, weight=1)
-        top.rowconfigure(0, weight=1)
+            try: top.attributes("-zoomed", True)
+            except Exception: pass
+        top.configure(bg="#F0F4F8")
+        top.columnconfigure(0, weight=1); top.rowconfigure(0, weight=1)
         top.protocol("WM_DELETE_WINDOW", top.destroy)
         return top
 
-
     def _create_figure(self):
-        # Khởi tạo Figure và Axes matplotlib theo phong cách tối, mượt hơn.
+        # Khởi tạo Figure và Axes matplotlib.
         from matplotlib.figure import Figure
-        fig = Figure(figsize=(15.6, 9.2), dpi=110)
-        fig.patch.set_facecolor("#0f172a")
-        fig.subplots_adjust(left=0.055, right=0.985, top=0.94, bottom=0.09)
+        fig = Figure(figsize=(16, 9.6), dpi=105)
+        fig.patch.set_facecolor("#F0F4F8")
+        fig.subplots_adjust(left=0.045, right=0.992, top=0.94, bottom=0.085)
         ax = fig.add_subplot(111)
-        ax.set_facecolor("#111827")
-        ax.set_axisbelow(True)
-        ax.grid(True, linestyle="--", linewidth=0.8, alpha=0.18, color="#64748b")
-        ax.spines["top"].set_visible(False)
-        ax.spines["right"].set_visible(False)
-        ax.spines["left"].set_color("#475569")
-        ax.spines["bottom"].set_color("#475569")
-        ax.tick_params(colors="#cbd5e1", labelsize=9)
+        ax.set_facecolor("#FAFBFC")
+        ax.grid(True, linestyle="--", linewidth=0.7, alpha=0.16)
+        ax.spines["top"].set_visible(False); ax.spines["right"].set_visible(False)
+        ax.spines["left"].set_color("#B5D4F4"); ax.spines["bottom"].set_color("#B5D4F4")
         return fig, ax
 
-
     def _plot_feasible_region(self, ax, X, Y, mask):
-        # Tô vùng chấp nhận được với lớp màu dịu và viền mềm để nhìn “mượt” hơn.
-        z = mask.astype(float)
-        ax.contourf(
-            X, Y, z,
-            levels=[0.5, 1.5],
-            colors=["#0ea5e9"],
-            alpha=0.14,
-            antialiased=True,
-            zorder=0,
-        )
-        ax.contour(
-            X, Y, z,
-            levels=[0.5],
-            colors=["#38bdf8"],
-            linewidths=1.2,
-            alpha=0.38,
-            zorder=0.2,
-        )
-
+        # Tô màu xanh lam nhạt (alpha 0.16) vùng chấp nhận được bằng contourf.
+        ax.contourf(X, Y, mask.astype(float), levels=[0.5, 1.5],
+                    alpha=0.18, colors=["#3B82F6"], zorder=0)
 
     def _plot_constraints(self, ax, halfplanes, xmin, xmax, ymin, ymax):
-        # Vẽ ràng buộc theo kiểu có “glow” nhẹ để đồng bộ với giao diện 3D.
-        palette = ["#60a5fa", "#a78bfa", "#14b8a6", "#f59e0b", "#fb7185", "#22d3ee"]
+        # Vẽ từng đường biên ràng buộc bằng một màu trong palette 6 màu xoay vòng.
+        # Hiển thị nhãn (RB1, RB2, x₁≥0…) ở giữa đoạn, tránh vẽ trùng nhãn.
+        palette = ["#2563EB","#7C3AED","#0F766E","#D97706","#BE123C","#0891B2"]
         seen = set()
         for idx, (a, b, c, sense, label) in enumerate(halfplanes):
             color = palette[idx % len(palette)]
             pts = self._line_box_intersections(a, b, c, xmin, xmax, ymin, ymax)
-            if len(pts) < 2:
-                continue
+            if len(pts) < 2: continue
             pts = sorted(pts, key=lambda p: (p[0], p[1]))
-            (x1, y1), (x2, y2) = pts[0], pts[-1]
-
-            # Lớp nền mờ giúp đường trông dày và mượt hơn.
-            ax.plot([x1, x2], [y1, y2],
-                    color=color, linewidth=5.2, alpha=0.10,
-                    solid_capstyle="round", zorder=1.8)
-            ax.plot([x1, x2], [y1, y2],
-                    color=color, linewidth=2.8, alpha=0.96,
-                    solid_capstyle="round", zorder=2.4)
-
+            (x1,y1),(x2,y2) = pts[0], pts[-1]
+            ax.plot([x1,x2],[y1,y2], color=color, linewidth=2.4,
+                    alpha=0.95, solid_capstyle="round", zorder=2)
             if label not in seen:
                 seen.add(label)
-                mx, my = (x1 + x2) / 2, (y1 + y2) / 2
-                dx, dy = 0.014 * (xmax - xmin), 0.014 * (ymax - ymin)
-                ax.text(
-                    mx + dx, my + dy, label,
-                    fontsize=9, color=color, weight="bold",
-                    bbox=dict(
-                        boxstyle="round,pad=0.25",
-                        fc="#0f172a",
-                        ec=color,
-                        lw=1.0,
-                        alpha=0.9,
-                    ),
-                    zorder=3,
-                )
+                mx,my = (x1+x2)/2,(y1+y2)/2
+                dx,dy = 0.012*(xmax-xmin), 0.012*(ymax-ymin)
+                ax.text(mx+dx, my+dy, label, fontsize=9, color=color,
+                        weight="bold",
+                        bbox=dict(boxstyle="round,pad=0.2",
+                                  fc="#ffffff", ec=color, alpha=0.88), zorder=3)
 
-
-    def _plot_objective_contours(self, ax, c1, c2, vv, xmin, xmax, ymin, ymax, maximize):
-        # Vẽ các đường đồng mức hàm mục tiêu với độ tương phản vừa phải,
-        # đường tối ưu nổi bật hơn nhưng không quá gắt.
-        if not vv or abs(c1) + abs(c2) < 1e-12:
+    def _plot_objective_contours(self, ax, c1, c2, vv, xmin, xmax, ymin, ymax,
+                                    maximize, z_best_override=None):
+        # Vẽ 5 đường đồng mức hàm mục tiêu: đường tối ưu liền nét đỏ đậm, 4 đường còn lại là nét đứt mờ.
+        # z_best_override: nếu có, dùng giá trị này thay vì tính từ vertex_values
+        #   (quan trọng khi report từ engine có z* chính xác hơn).
+        if abs(c1)+abs(c2) < 1e-12: return
+        if z_best_override is not None:
+            z_best = z_best_override
+            span = max(1., abs(z_best) * 0.5 if abs(z_best) > 1e-9 else 1.)
+            if vv:
+                zvals = sorted(v[2] for v in vv)
+                span = max(span, abs(zvals[-1]-zvals[0]) if len(zvals) > 1 else span)
+        elif vv:
+            zvals = sorted(v[2] for v in vv)
+            z_best = max(zvals) if maximize else min(zvals)
+            span = max(1., abs(zvals[-1]-zvals[0]) if len(zvals)>1 else max(1., abs(z_best)))
+        else:
             return
-
-        zvals = sorted(v[2] for v in vv)
-        z_best = max(zvals) if maximize else min(zvals)
-        spread = max(1.0, abs(zvals[-1] - zvals[0]) if len(zvals) > 1 else abs(z_best) or 1.0)
-        levels = [z_best - 1.2 * spread, z_best - 0.65 * spread, z_best - 0.22 * spread,
-                  z_best, z_best + 0.22 * spread, z_best + 0.65 * spread, z_best + 1.2 * spread]
-
+        levels = [z_best-span, z_best-0.5*span, z_best,
+                  z_best+0.5*span, z_best+span]
         for lv in levels:
             pts = self._line_box_intersections(
                 Fraction(str(c1)), Fraction(str(c2)), Fraction(str(lv)),
-                xmin, xmax, ymin, ymax
-            )
-            if len(pts) < 2:
-                continue
-            pts = sorted(pts, key=lambda p: (p[0], p[1]))
-            (x1, y1), (x2, y2) = pts[0], pts[-1]
-            is_best = abs(lv - z_best) < 1e-9
-
-            ax.plot(
-                [x1, x2], [y1, y2],
-                color="#f59e0b" if is_best else "#93c5fd",
-                linewidth=3.0 if is_best else 1.4,
-                linestyle="-" if is_best else "--",
-                alpha=0.92 if is_best else 0.22,
-                zorder=1.5,
-            )
+                xmin, xmax, ymin, ymax)
+            if len(pts) < 2: continue
+            pts = sorted(pts, key=lambda p:(p[0],p[1]))
+            (x1,y1),(x2,y2) = pts[0],pts[-1]
+            is_best = abs(lv-z_best) < 1e-9
+            ax.plot([x1,x2],[y1,y2], color="#2563EB",
+                    linewidth=2.8 if is_best else 1.6,
+                    linestyle="-" if is_best else "--",
+                    alpha=0.75 if is_best else 0.28, zorder=1.5)
             if is_best:
-                tx, ty = (x1 + x2) / 2, (y1 + y2) / 2
-                ax.text(
-                    tx, ty,
-                    f"  z = {fmt_num(Fraction(str(lv)), self.data_mode.get())}",
-                    color="#e2e8f0",
-                    fontsize=9,
-                    weight="bold",
-                    bbox=dict(
-                        boxstyle="round,pad=0.28",
-                        fc="#1e293b",
-                        ec="#f59e0b",
-                        alpha=0.95,
-                    ),
-                    zorder=4,
-                )
-
+                tx,ty = (x1+x2)/2,(y1+y2)/2
+                ax.text(tx, ty,
+                        f"  z = {fmt_num(Fraction(str(lv)), self.data_mode.get())}",
+                        color="#1E3A5F", fontsize=9, weight="bold",
+                        bbox=dict(boxstyle="round,pad=0.2",
+                                  fc="#E8F4FD", ec="#B5D4F4", alpha=0.95), zorder=4)
 
     def _plot_vertices(self, ax, vv, maximize):
-        # Tô đa giác các đỉnh khả thi và gắn số thứ tự với nhãn rõ hơn.
-        if not vv:
-            return
+        # Sắp xếp các đỉnh theo góc cực (convex hull) rồi tô đa giác mờ và vẽ đường viền chấm.
+        # Mỗi đỉnh được đánh số (1, 2, …) để người dùng đối chiếu với bảng thông tin bên phải.
+        if not vv: return
         pts = list(vv)
-        cx = sum(p[0] for p in pts) / len(pts)
-        cy = sum(p[1] for p in pts) / len(pts)
-        pts.sort(key=lambda t: math.atan2(t[1] - cy, t[0] - cx))
-
-        xs = [p[0] for p in pts]
-        ys = [p[1] for p in pts]
-
-        ax.fill(xs, ys, color="#38bdf8", alpha=0.10, zorder=1.0)
-        ax.plot(xs + [xs[0]], ys + [ys[0]],
-                color="#93c5fd", linewidth=1.2,
-                linestyle=":", alpha=0.50, zorder=2.2)
-
-        for idx, (vx, vy, val) in enumerate(pts, start=1):
-            ax.scatter([vx], [vy], s=58, color="#e2e8f0",
-                       edgecolors="#0f172a", linewidths=1.0, zorder=5)
-            ax.scatter([vx], [vy], s=24, color="#60a5fa",
-                       edgecolors="none", zorder=5.1)
-            ax.annotate(
-                f"{idx}",
-                xy=(vx, vy),
-                xytext=(7, 7),
-                textcoords="offset points",
-                fontsize=9,
-                color="#e2e8f0",
-                bbox=dict(boxstyle="circle,pad=0.20", fc="#1e293b", ec="#60a5fa", alpha=0.96),
-                zorder=6,
-            )
-
+        cx = sum(p[0] for p in pts)/len(pts)
+        cy = sum(p[1] for p in pts)/len(pts)
+        pts.sort(key=lambda t: math.atan2(t[1]-cy, t[0]-cx))
+        ax.fill([p[0] for p in pts],[p[1] for p in pts],
+                color="#E8F4FD", alpha=0.22, zorder=1)
+        ax.plot([p[0] for p in pts]+[pts[0][0]],
+                [p[1] for p in pts]+[pts[0][1]],
+                color="#185FA5", linewidth=1.2, linestyle=":", alpha=0.55, zorder=2.5)
+        for idx,(vx,vy,val) in enumerate(pts,start=1):
+            ax.scatter([vx],[vy], s=42, color="#3B82F6",
+                       edgecolors="white", linewidths=1.0, zorder=5)
+            ax.annotate(f"{idx}", xy=(vx,vy), xytext=(6,6),
+                        textcoords="offset points", fontsize=9, color="#1E3A5F",
+                        bbox=dict(boxstyle="circle,pad=0.18",
+                                  fc="#E8F4FD", ec="#B5D4F4", alpha=0.95), zorder=6)
 
     def _plot_optimal_point(self, ax, optimal, maximize):
-        # Đánh dấu điểm tối ưu nổi bật hơn, đồng thời giữ tông màu hài hòa.
-        if optimal is None:
-            return
-        bx, by, bz = optimal
-        ax.scatter([bx], [by], s=340, marker="*", color="#f59e0b",
-                   edgecolors="#0f172a", linewidths=1.2, zorder=7)
-        ax.scatter([bx], [by], s=120, marker="o", facecolors="none",
-                   edgecolors="#fde68a", linewidths=1.8, zorder=6.9)
+        # Đánh dấu điểm tối ưu bằng hình sao vàng lớn (size 220) và chú thích
+        # tọa độ + giá trị z, với mũi tên chỉ vào điểm.
+        if optimal is None: return
+        bx,by,bz = optimal
+        ax.scatter([bx],[by], s=220, marker="*", color="#F59E0B",
+                   edgecolors="#1E3A5F", linewidths=1.2, zorder=7)
         ax.annotate(
             f"Điểm tối ưu\n({bx:.3g}, {by:.3g})\nz = {bz:.3g}",
-            xy=(bx, by),
-            xytext=(14, 18),
-            textcoords="offset points",
-            fontsize=10,
-            fontweight="bold",
-            color="#e2e8f0",
-            bbox=dict(boxstyle="round,pad=0.38", fc="#1e293b", ec="#f59e0b", alpha=0.97),
-            arrowprops=dict(arrowstyle="->", color="#f59e0b", lw=1.5),
-            zorder=8,
-        )
-
+            xy=(bx,by), xytext=(14,18), textcoords="offset points",
+            fontsize=10, fontweight="bold",
+            bbox=dict(boxstyle="round,pad=0.35",
+                      fc="#FEF9C3", ec="#F59E0B", alpha=0.98),
+            arrowprops=dict(arrowstyle="->", color="#D97706", lw=1.5), zorder=8)
 
     def _configure_axes(self, ax, xmin, xmax, ymin, ymax):
-        # Thiết lập trục theo phong cách tối, đồng bộ với 3D.
-        ax.set_xlim(xmin, xmax)
-        ax.set_ylim(ymin, ymax)
+        # Thiết lập tiêu đề, nhãn trục, trục tọa độ (axhline/axvline), legend.
+        ax.set_xlim(xmin,xmax); ax.set_ylim(ymin,ymax)
         ax.set_aspect("auto", adjustable="box")
-        ax.set_xlabel("x₁", fontsize=12, fontweight="bold", color="#e2e8f0")
-        ax.set_ylabel("x₂", fontsize=12, fontweight="bold", color="#e2e8f0")
-        ax.set_title(
-            "Miền chấp nhận được và đường đồng mức hàm mục tiêu",
-            fontsize=14,
-            fontweight="bold",
-            pad=12,
-            color="#e2e8f0",
-        )
-
-        ax.axhline(0, color="#64748b", linewidth=1.0, alpha=0.55, zorder=0.5)
-        ax.axvline(0, color="#64748b", linewidth=1.0, alpha=0.55, zorder=0.5)
-
-        ax.tick_params(colors="#cbd5e1", labelsize=9)
-
+        ax.set_xlabel("x₁", fontsize=12, fontweight="bold")
+        ax.set_ylabel("x₂", fontsize=12, fontweight="bold")
+        ax.set_title("Miền chấp nhận được và đường đồng mức hàm mục tiêu",
+                     fontsize=14, fontweight="bold", pad=10, color="#1E3A5F")
+        ax.axhline(0,color="#334155",linewidth=1.1,alpha=0.7,zorder=0.5)
+        ax.axvline(0,color="#334155",linewidth=1.1,alpha=0.7,zorder=0.5)
         hs, ls = ax.get_legend_handles_labels()
         if hs:
-            ax.legend(
-                hs, ls,
-                loc="upper left",
-                frameon=True,
-                fontsize=9,
-                title="Ràng buộc",
-                title_fontsize=10,
-                fancybox=True,
-                shadow=False,
-                facecolor="#0f172a",
-                edgecolor="#334155",
-                labelcolor="#e2e8f0",
-            )
-
+            ax.legend(hs,ls,loc="upper left",frameon=True,fontsize=9,
+                      title="Ràng buộc",title_fontsize=10,fancybox=True,
+                      shadow=False,facecolor="#FAFBFC",edgecolor="#B5D4F4")
 
     def _create_control_button(self, parent, text, color, hover_color, command):
-        # Tạo nút tkinter với hiệu ứng hover gọn và sắc nét hơn.
-        btn = tk.Button(
-            parent,
-            text=text,
-            font=("Segoe UI", 9, "bold"),
-            bg=color,
-            fg="white",
-            activebackground=hover_color,
-            activeforeground="white",
-            relief="flat",
-            bd=0,
-            padx=12,
-            pady=6,
-            cursor="hand2",
-            command=command,
-        )
+        # Tạo nút tkinter với hiệu ứng hover đơn giản (đổi màu nền khi rê chuột).
+        btn = tk.Button(parent, text=text, font=("Segoe UI",10,"bold"),
+                        bg=color, fg="white", activebackground=hover_color,
+                        activeforeground="white", relief="flat", bd=0,
+                        padx=10, pady=6, cursor="hand2", command=command)
         btn.pack(side="left", padx=4, pady=4)
         btn.bind("<Enter>", lambda e: btn.config(bg=hover_color))
         btn.bind("<Leave>", lambda e: btn.config(bg=color))
         return btn
-
 
     def _enable_canvas_interactions(self, ax, canvas):
         # Gắn các sự kiện chuột vào canvas matplotlib:
         #   - Kéo nút trái: pan (di chuyển khung nhìn)
         #   - Lăn chuột: zoom vào/ra quanh vị trí con trỏ
         state = {"press": None}
-
         def clamp():
-            xm, xx = ax.get_xlim()
-            ym, yx = ax.get_ylim()
-            if xx - xm < 1e-6:
-                ax.set_xlim(xm - 1, xx + 1)
-            if yx - ym < 1e-6:
-                ax.set_ylim(ym - 1, yx + 1)
-
+            xm,xx = ax.get_xlim(); ym,yx = ax.get_ylim()
+            if xx-xm < 1e-6: ax.set_xlim(xm-1,xx+1)
+            if yx-ym < 1e-6: ax.set_ylim(ym-1,yx+1)
         def on_press(ev):
-            if ev.inaxes != ax or ev.button != 1 or ev.xdata is None:
-                return
-            state["press"] = (ev.xdata, ev.ydata, ax.get_xlim(), ax.get_ylim())
-
-        def on_release(ev):
-            state["press"] = None
-
+            if ev.inaxes!=ax or ev.button!=1 or ev.xdata is None: return
+            state["press"]=(ev.xdata,ev.ydata,ax.get_xlim(),ax.get_ylim())
+        def on_release(ev): state["press"]=None
         def on_move(ev):
-            if not state["press"] or ev.inaxes != ax or ev.xdata is None:
-                return
-            x0, y0, xl, yl = state["press"]
-            ax.set_xlim(xl[0] + x0 - ev.xdata, xl[1] + x0 - ev.xdata)
-            ax.set_ylim(yl[0] + y0 - ev.ydata, yl[1] + y0 - ev.ydata)
-            clamp()
-            self._request_canvas_redraw(canvas)
-
+            if not state["press"] or ev.inaxes!=ax or ev.xdata is None: return
+            x0,y0,xl,yl = state["press"]
+            ax.set_xlim(xl[0]+x0-ev.xdata, xl[1]+x0-ev.xdata)
+            ax.set_ylim(yl[0]+y0-ev.ydata, yl[1]+y0-ev.ydata)
+            clamp(); self._request_canvas_redraw(canvas)
         def on_scroll(ev):
-            if ev.inaxes != ax or ev.xdata is None:
-                return
-            base = 1.08 if getattr(ev, "button", None) == "down" else 1 / 1.08
-            xl = ax.get_xlim()
-            yl = ax.get_ylim()
-            xd, yd = ev.xdata, ev.ydata
-            nw = (xl[1] - xl[0]) * base
-            nh = (yl[1] - yl[0]) * base
-            rx = (xl[1] - xd) / (xl[1] - xl[0])
-            ry = (yl[1] - yd) / (yl[1] - yl[0])
-            ax.set_xlim(xd - (1 - rx) * nw, xd + rx * nw)
-            ax.set_ylim(yd - (1 - ry) * nh, yd + ry * nh)
-            clamp()
-            self._request_canvas_redraw(canvas)
-
-        canvas.mpl_connect("button_press_event", on_press)
-        canvas.mpl_connect("button_release_event", on_release)
-        canvas.mpl_connect("motion_notify_event", on_move)
-        canvas.mpl_connect("scroll_event", on_scroll)
-
+            if ev.inaxes!=ax or ev.xdata is None: return
+            base=1.10 if getattr(ev,"button",None)=="down" else 1/1.10
+            xl=ax.get_xlim(); yl=ax.get_ylim()
+            xd,yd=ev.xdata,ev.ydata
+            nw=(xl[1]-xl[0])*base; nh=(yl[1]-yl[0])*base
+            rx=(xl[1]-xd)/(xl[1]-xl[0]); ry=(yl[1]-yd)/(yl[1]-yl[0])
+            ax.set_xlim(xd-(1-rx)*nw, xd+rx*nw)
+            ax.set_ylim(yd-(1-ry)*nh, yd+ry*nh)
+            clamp(); self._request_canvas_redraw(canvas)
+        canvas.mpl_connect("button_press_event",on_press)
+        canvas.mpl_connect("button_release_event",on_release)
+        canvas.mpl_connect("motion_notify_event",on_move)
+        canvas.mpl_connect("scroll_event",on_scroll)
 
     def _create_zoom_controls(self, parent, ax, canvas, initial_xlim, initial_ylim):
-        # Thanh điều khiển phía dưới với cùng tông màu tối như phần trực quan hóa 3D.
-        ctrl = tk.Frame(parent, bg="#1e293b")
-        ctrl.grid(row=1, column=0, sticky="ew", pady=(8, 0))
-        ctrl.columnconfigure(0, weight=1)
-
-        btn_frame = tk.Frame(ctrl, bg="#1e293b")
-        btn_frame.pack(side="left", padx=12, pady=6)
-
-        def reset_view():
-            ax.set_xlim(initial_xlim)
-            ax.set_ylim(initial_ylim)
+        # Tạo thanh điều khiển zoom ở góc dưới trái: nút "+" (zoom in), "−" (zoom out), "return" (trở về khung nhìn ban đầu) và nhãn gợi ý thao tác kéo/lăn chuột.
+        cf = tk.Frame(parent, bg="#1E3A5F",
+                      highlightthickness=1, highlightbackground="#185FA5")
+        cf.place(relx=0.015, rely=0.965, anchor="sw")
+        def zi():
+            x1,x2=ax.get_xlim(); y1,y2=ax.get_ylim()
+            dx=(x2-x1)*0.14; dy=(y2-y1)*0.14
+            ax.set_xlim(x1+dx,x2-dx); ax.set_ylim(y1+dy,y2-dy)
             self._request_canvas_redraw(canvas)
-
-        def fit_view():
-            x1, x2 = ax.get_xlim()
-            y1, y2 = ax.get_ylim()
-            dx = (x2 - x1) * 0.14
-            dy = (y2 - y1) * 0.14
-            ax.set_xlim(x1 + dx, x2 - dx)
-            ax.set_ylim(y1 + dy, y2 - dy)
+        def zo():
+            x1,x2=ax.get_xlim(); y1,y2=ax.get_ylim()
+            dx=(x2-x1)*0.14; dy=(y2-y1)*0.14
+            ax.set_xlim(x1-dx,x2+dx); ax.set_ylim(y1-dy,y2+dy)
             self._request_canvas_redraw(canvas)
-
-        def toggle_grid():
-            ax.grid(not ax.get_xgridlines()[0].get_visible())
+        def rst():
+            ax.set_xlim(initial_xlim); ax.set_ylim(initial_ylim)
             self._request_canvas_redraw(canvas)
+        self._create_control_button(cf,"+","#3B82F6","#2563EB",zi)
+        self._create_control_button(cf,"−","#F59E0B","#D97706",zo)
+        self._create_control_button(cf,"return","#6EBF8B","#4DAA72",rst)
+        tk.Label(cf, text="Kéo chuột trái để di chuyển -- Lăn chuột để zoom",
+                 bg="#1E3A5F", fg="#B5D4F4", font=("Segoe UI",9)).pack(
+            side="left", padx=10, pady=6)
 
-        self._create_control_button(btn_frame, "Mặc định", "#334155", "#475569", reset_view)
-        self._create_control_button(btn_frame, "Fit", "#1d4ed8", "#1e40af", fit_view)
-        self._create_control_button(btn_frame, "Lưới", "#64748b", "#475569", toggle_grid)
-
-        tk.Label(
-            ctrl,
-            text="Kéo chuột trái để pan -- Lăn chuột để zoom -- Nút Fit để thu khung nhìn",
-            bg="#1e293b",
-            fg="#94a3b8",
-            font=("Segoe UI", 9),
-        ).pack(side="right", padx=16)
-
-
-    def _create_info_panel(self, parent, prob, vertices, vv, optimal, maximize):
-        # Bảng tóm tắt kiểu 3D: tối, gọn, và có đủ thông tin quan trọng để người dùng đọc nhanh.
-        info_frame = tk.Frame(
-            parent,
-            bg="#111827",
-            bd=0,
-            highlightthickness=1,
-            highlightbackground="#334155",
+    def _plot_unbounded_arrow(self, ax, c1, c2, maximize, xmin, xmax, ymin, ymax):
+        # Vẽ mũi tên chỉ hướng hàm mục tiêu tiến đến vô cực (chỉ khi unbounded).
+        # Đặt tại tâm khung nhìn, hướng theo gradient (c1, c2) hoặc ngược lại.
+        import math
+        cx, cy = (xmin+xmax)/2, (ymin+ymax)/2
+        norm = math.sqrt(c1**2 + c2**2)
+        if norm < 1e-10: return
+        scale = min(xmax-xmin, ymax-ymin) * 0.25
+        sign = 1 if maximize else -1
+        dx, dy = sign*c1/norm*scale, sign*c2/norm*scale
+        ax.annotate(
+            "", xy=(cx+dx, cy+dy), xytext=(cx, cy),
+            arrowprops=dict(arrowstyle="-|>", color="#dc2626",
+                            lw=2.2, mutation_scale=18),
+            zorder=8
         )
-        info_frame.place(relx=0.985, rely=0.02, anchor="ne", width=340, height=214)
+        ax.text(cx+dx*1.05, cy+dy*1.05, "Z → ∞",
+                color="#dc2626", fontsize=10, fontweight="bold",
+                ha="center", va="center",
+                bbox=dict(boxstyle="round,pad=0.25",
+                          fc="#fff7f7", ec="#dc2626", alpha=0.92), zorder=9)
 
-        title = tk.Label(
-            info_frame,
-            text="Tóm tắt",
-            bg="#111827",
-            fg="#e2e8f0",
-            font=("Segoe UI", 11, "bold"),
-        )
-        title.pack(anchor="w", padx=10, pady=(8, 2))
-
-        text = tk.Text(
-            info_frame,
-            wrap="word",
-            bg="#111827",
-            fg="#cbd5e1",
-            insertbackground="#cbd5e1",
-            bd=0,
-            font=("Segoe UI", 9),
-            height=10,
-            padx=10,
-            pady=6,
-            highlightthickness=0,
-        )
+    def _create_info_panel(self, parent, prob, vertices, vv, optimal, maximize,
+                           status=None, multiple_optimal=False, second_optimal=None):
+        # Tạo bảng tóm tắt nhỏ ở góc trên phải đồ thị.
+        # status / multiple_optimal / second_optimal: từ engine.
+        info_frame = tk.Frame(parent, bg="#FAFBFC", bd=0,
+                              highlightthickness=1, highlightbackground="#B5D4F4")
+        info_frame.place(relx=0.987, rely=0.02, anchor="ne", width=320, height=230)
+        title = tk.Label(info_frame, text="Tóm tắt", bg="#FAFBFC",
+                         fg="#1E3A5F", font=("Segoe UI",11,"bold"))
+        title.pack(anchor="w", padx=10, pady=(8,2))
+        text = tk.Text(info_frame, wrap="word", bg="#FAFBFC", fg="#334155",
+                       bd=0, font=("Segoe UI",9), height=12, padx=10, pady=6)
         text.pack(fill="both", expand=True)
-
         lines = [
-            f"Kiểu: {'Bài toán Max' if prob.objective_sense == 'max' else 'Bài toán Min'}",
+            f"Kiểu: {'Bài toán Max' if prob.objective_sense=='max' else 'Bài toán Min'}",
             f"Số ràng buộc: {len(prob.constraints)}",
             f"Số đỉnh khả thi: {len(vertices)}",
         ]
-        if optimal:
+        if status == "unbounded":
+            lines.append("Trạng thái: Không giới nội (Z → ∞)")
+        elif status == "infeasible":
+            lines.append("Trạng thái: Vô nghiệm")
+        elif status == "optimal" and multiple_optimal:
+            lines.append("Trạng thái: Vô số nghiệm tối ưu")
+        # Hiển thị nghiệm
+        if status == "optimal" and multiple_optimal and second_optimal is not None:
             lines += [
-                f"Điểm tối ưu: ({optimal[0]:.3g}, {optimal[1]:.3g})",
-                f"Giá trị mục tiêu: {optimal[2]:.3g}",
+                f"z* = {optimal[2]:.4g}",
+                f"Đỉnh A: ({optimal[0]:.4g}, {optimal[1]:.4g})",
+                f"Đỉnh B: ({second_optimal[0]:.4g}, {second_optimal[1]:.4g})",
+                "Mọi điểm trên đoạn AB đều tối ưu.",
             ]
-        else:
+        elif status == "optimal" and multiple_optimal:
+            lines += [
+                f"Điểm tối ưu: ({optimal[0]:.4g}, {optimal[1]:.4g})",
+                f"z* = {optimal[2]:.4g}",
+                "(Không tính được đỉnh thứ hai)",
+            ]
+        elif optimal:
+            lines += [f"Điểm tối ưu: ({optimal[0]:.4g}, {optimal[1]:.4g})",
+                      f"Giá trị mục tiêu: {optimal[2]:.4g}"]
+        elif status not in ("unbounded", "infeasible"):
             lines.append("Chưa tìm được miền khả thi.")
-        lines += [
-            "Kéo chuột trái để pan.",
-            "Lăn chuột để zoom.",
-            "Dùng nút dưới để Fit / Mặc định / Lưới.",
-        ]
+        lines += ["", "Kéo chuột trái để pan.",
+                  "Dùng nút hoặc lăn chuột để zoom."]
         text.insert("1.0", "\n".join(lines))
         text.config(state="disabled")
 
+
     def _format_problem(self, engine):
         # Tạo chuỗi hiển thị bài toán gốc (trước chuẩn hóa):
-        # Căn thẳng cột: cụm (hệ số·biến) của từng biến thẳng nhau, dấu ≤/≥/= thẳng, RHS thẳng.
+        # dòng "min/max Z = c1·x1 + … + cn·xn" và từng ràng buộc, điều kiện dấu.
         mode = self.data_mode.get()
-        prob = engine.problem
-        n = len(prob.obj_coeffs)
-        var_names = [f"x{i+1}" for i in range(n)]
-
-        def fmt_coeff(c):
-            """Định dạng hệ số tuyệt đối (không có dấu)."""
-            return fmt_num(abs(c), mode)
-
-        def build_terms(coeffs):
-            """Trả về list (sign_str, body_str) cho từng hạng tử khác 0."""
-            terms = []
-            for c, nm in zip(coeffs, var_names):
-                if c == 0:
-                    continue
-                sign = "+" if c > 0 else "-"
-                if abs(c) == 1:
-                    body = nm
-                else:
-                    body = f"{fmt_coeff(c)}{nm}"
-                terms.append((sign, body))
-            return terms
-
-        # ── Thu thập tất cả hàng để tính độ rộng cột ────────────────────
-        # Mỗi hàng là list các (sign, body) theo thứ tự biến
-        def row_cells(coeffs):
-            """Với mỗi biến xj, trả về chuỗi hiển thị cho ô đó (có thể rỗng)."""
-            cells = []
-            for c, nm in zip(coeffs, var_names):
-                if c == 0:
-                    cells.append(("", ""))
-                else:
-                    sign = "+" if c > 0 else "-"
-                    body = nm if abs(c) == 1 else f"{fmt_coeff(c)}{nm}"
-                    cells.append((sign, body))
-            return cells
-
-        obj_cells   = row_cells(prob.obj_coeffs)
-        cons_cells  = [row_cells(cons["coeffs"]) for cons in prob.constraints]
-        all_cells   = [obj_cells] + cons_cells
-
-        # Độ rộng mỗi cột (sign + body gộp lại, ví dụ "- 3/2x2")
-        col_w = []
-        for j in range(n):
-            w = 0
-            for row in all_cells:
-                sign, body = row[j]
-                cell_str = f"{sign} {body}" if sign else ""
-                w = max(w, len(cell_str))
-            col_w.append(max(w, len(var_names[j]) + 2))  # tối thiểu đủ chứa tên biến
-
-        # Độ rộng RHS
-        rhs_strs = [fmt_num(cons["rhs"], mode) for cons in prob.constraints]
-        rhs_w = max((len(s) for s in rhs_strs), default=1)
-
-        def render_row(cells):
-            """Ghép một hàng đã căn phải theo col_w."""
-            parts = []
-            first_nonzero = True
-            for j, (sign, body) in enumerate(cells):
-                if not sign:  # hệ số = 0, điền khoảng trắng
-                    parts.append(" " * col_w[j])
-                else:
-                    if first_nonzero and sign == "+":
-                        cell_str = body          # hạng tử đầu bỏ dấu +
-                    else:
-                        cell_str = f"{sign} {body}"
-                    parts.append(cell_str.rjust(col_w[j]))
-                    first_nonzero = False
-            return "  ".join(parts).rstrip()
-
-        sense_label = "max" if prob.objective_sense == "max" else "min"
-        obj_line = f"    {sense_label} Z = {render_row(obj_cells)}"
-
-        # Căn dấu ràng buộc và RHS
-        sense_w = 1  # "≤" / "≥" / "=" đều 1 ký tự
-        con_lines = []
-        for i, cons in enumerate(prob.constraints):
-            lhs  = render_row(cons_cells[i])
-            s    = cons["sense"]
-            rhs  = rhs_strs[i].rjust(rhs_w)
-            con_lines.append(f"      {lhs}  {s}  {rhs}")
-
-        # Điều kiện dấu biến
-        sign_parts = []
-        for i, sg in enumerate(prob.var_signs):
-            nm = f"x{i+1}"
-            if sg == "≥0":     sign_parts.append(f"{nm} ≥ 0")
-            elif sg == "≤0":   sign_parts.append(f"{nm} ≤ 0")
-            else:              sign_parts.append(f"{nm} tự do")
-
-        lines = [
-            "Bài tập Quy Hoạch Tuyến Tính — Phương pháp Đơn hình",
-            "  Bài toán gốc:",
-            obj_line,
-            "    s.t. {",
-        ]
-        lines += con_lines
-        lines.append(f"      {',  '.join(sign_parts)}")
+        def expr(coeffs, names):
+            parts=[]
+            for c,nm in zip(coeffs,names):
+                if c==0: continue
+                if c==1: parts.append(f"+ {nm}")
+                elif c==-1: parts.append(f"- {nm}")
+                elif c>0: parts.append(f"+ {fmt_num(c,mode)}{nm}")
+                else: parts.append(f"- {fmt_num(-c,mode)}{nm}")
+            if not parts: return "0"
+            s=" ".join(parts)
+            return s[2:] if s.startswith("+ ") else s
+        lines=["Bài tập Quy Hoạch Tuyến Tính — Phương pháp Đơn hình","  Bài toán gốc:"]
+        n=len(engine.problem.obj_coeffs)
+        lines.append(f"    {engine.problem.objective_sense} Z = {expr(engine.problem.obj_coeffs,[f'x{i+1}' for i in range(n)])}")
+        lines.append("    {")
+        for cons in engine.problem.constraints:
+            lines.append(f"      {expr(cons['coeffs'],[f'x{i+1}' for i in range(len(cons['coeffs']))])} {cons['sense']} {fmt_num(cons['rhs'],mode)}")
+        lines.append(f"    {', '.join(f'x{i+1}' for i in range(len(engine.problem.var_signs)))} thuộc các điều kiện dấu đã chọn")
         lines.append("    }")
         return "\n".join(lines)
 
@@ -1547,50 +1394,23 @@ class SimplexApp(Viz3DMixin, tk.Tk):
         return "\n".join(lines)
 
     def _dict_lines(self, snapshot):
-        # Tạo danh sách dòng cho bảng từ vựng.
-        # Mỗi cột biến có độ rộng = max độ rộng hạng tử thực tế trên tất cả hàng.
-        # Khoảng cách giữa các cột = GAP cố định (không phụ thuộc nội dung).
-        # Bỏ separator │ để gọn hơn.
-        GAP = 2          # số khoảng trắng giữa hai cột liền kề
-        mode = self.data_mode.get()
-        names = snapshot.all_names
-
-        all_rows = [(snapshot.objective_label, snapshot.obj_const, snapshot.obj)]
-        for i, b in enumerate(snapshot.basis):
-            all_rows.append((names[b], snapshot.rhs[i], snapshot.rows[i]))
-
-        # Độ rộng cột nhãn và cột hằng số
-        label_w = max(len(row[0]) for row in all_rows)
-        const_strs = [fmt_num(row[1], mode) for row in all_rows]
-        const_w = max(len(s) for s in const_strs)
-
-        # Độ rộng mỗi cột biến: max độ rộng hạng tử (kể cả "0" nếu hệ số = 0 được bỏ → ô trống)
-        # Hạng tử rỗng ("") vẫn cần giữ chỗ bằng đúng độ rộng cột → không dùng ljust mà dùng rjust
-        col_w = []
-        col_cells = []   # col_cells[row_idx][col_idx] = chuỗi hạng tử (có thể rỗng)
-        for _ in all_rows:
-            col_cells.append([])
-
-        for j, name in enumerate(names):
-            w = 0
-            for ri, (_, _, coeffs) in enumerate(all_rows):
-                s = term_str(coeffs.get(j, Fraction(0)), name, mode)
-                col_cells[ri].append(s)
-                w = max(w, len(s))
-            col_w.append(w)   # độ rộng thực tế tối thiểu; có thể bằng 0 nếu cột toàn rỗng
-
-        def line_for(ri, label, const_s):
-            label_part = label.ljust(label_w)
-            const_part = const_s.rjust(const_w)
-            # Mỗi ô: ljust theo col_w[j] (giữ chỗ cho ô rỗng)
-            term_parts = [col_cells[ri][j].ljust(col_w[j]) for j in range(len(names))]
-            # Ghép bằng GAP khoảng trắng, sau đó rstrip để bỏ trailing spaces
-            term_part = (" " * GAP).join(term_parts).rstrip()
-            return f"{label_part} = {const_part}    {term_part}"
-
-        lines = []
-        for ri, ((label, const, coeffs), const_s) in enumerate(zip(all_rows, const_strs)):
-            lines.append(line_for(ri, label, const_s))
+        # Tạo danh sách dòng văn bản cho bảng từ vựng (dictionary) tại một snapshot.
+        # Mỗi dòng: "[tên biến cơ sở] = [hằng số]  [hệ số biến phi cơ sở…]"
+        mode=self.data_mode.get(); names=snapshot.all_names
+        widths=[]
+        for j,name in enumerate(names):
+            ml=len(name)
+            for c in [snapshot.obj.get(j,Fraction(0))]+[r.get(j,Fraction(0)) for r in snapshot.rows]:
+                ml=max(ml,len(term_str(c,name,mode)))
+            widths.append(max(8,min(14,ml+2)))
+        def line_for(label,const,coeffs):
+            out=[f"{label} = {fmt_num(const,mode)}"]
+            for j,name in enumerate(names):
+                out.append(term_str(coeffs.get(j,Fraction(0)),name,mode).ljust(widths[j]))
+            return " ".join(out).rstrip()
+        lines=[line_for(snapshot.objective_label, snapshot.obj_const, snapshot.obj)]
+        for i,b in enumerate(snapshot.basis):
+            lines.append(line_for(names[b], snapshot.rhs[i], snapshot.rows[i]))
         return lines
 
     def _insert_snapshot(self, snapshot, title, tags=None):
@@ -1722,18 +1542,13 @@ class SimplexApp(Viz3DMixin, tk.Tk):
                 self.output.insert(tk.END,"\n")
         if trace.status=="optimal": self.output.insert(tk.END,"  Các hệ số cải thiện không còn âm → tối ưu.\n","note")
         elif trace.status=="unbounded": self.output.insert(tk.END,"  Bài toán không giới nội.\n","warn")
-        elif trace.status=="cycle":
-            rule = "Dantzig" if trace.steps and trace.steps[0].method == "dantzig" else "Bland"
-            if rule == "Dantzig":
-                self.output.insert(tk.END,"  Dantzig phát hiện xoay vòng → dừng và gợi ý dùng Bland.\n","warn")
-            else:
-                self.output.insert(tk.END,"  Bland phát hiện xoay vòng.\n","warn")
+        elif trace.status=="cycle": self.output.insert(tk.END,"  Dantzig lặp → chuyển sang Bland.\n","warn")
 
     def _render_result(self, report):
         # Xóa output cũ và in toàn bộ lời giải theo cấu trúc:
         #   1. Bài toán gốc + chuẩn hóa
-        #   2. Pha 1 (nếu cần biến phụ x0): trace theo phương pháp đã chọn
-        #   3. Pha 2: trace theo phương pháp đã chọn
+        #   2. Pha 1 (nếu cần biến phụ x0): trace Dantzig [→ Bland nếu lặp]
+        #   3. Pha 2: trace Dantzig [→ Bland nếu lặp]
         #   4. KẾT LUẬN: trạng thái, z*, nghiệm tối ưu (hoặc họ vô số nghiệm)
         self.output.delete("1.0",tk.END)
         engine=report.engine; mode=self.data_mode.get()
@@ -1756,21 +1571,16 @@ class SimplexApp(Viz3DMixin, tk.Tk):
             else:
                 self.output.insert(tk.END,"\nKẾT LUẬN\n  Vô nghiệm.\n","warn"); return
         else:
-            self.output.insert(tk.END,"\n============================\n Không cần Pha 1\n============================\n_ b_i ≥ 0, cơ sở ban đầu khả thi, giải trực tiếp.\n\n============================\n Giải bài toán\n============================\n","h2")
-            self._render_trace("Giải bài toán",report.dantzig)
+            self.output.insert(tk.END,"\n============================\n*Pha 1:\n============================\n_ b_i ≥ 0, không cần pha 1.\n\n============================\n*Pha 2: Giải bài toán gốc\n============================\n","h2")
+            self._render_trace("Pha 2",report.dantzig)
             if report.bland is not None and report.bland is not report.dantzig:
-                self.output.insert(tk.END,"\n Bland (sau Dantzig xoay vòng)\n","h2")
-                self._render_trace("Bland",report.bland)
+                self.output.insert(tk.END,"\n*Bland sau Dantzig lặp ở pha 2\n","h2")
+                self._render_trace("Pha 2 - Bland",report.bland)
         final=report.phase2_trace.final_snapshot if report.phase2_trace and report.phase2_trace.final_snapshot else (report.bland.final_snapshot if report.bland and report.bland.final_snapshot else report.dantzig.final_snapshot)
         if report.status in ("unbounded",) or (report.bland and report.bland.status=="unbounded"):
             self.output.insert(tk.END,"\nKẾT LUẬN\n  Không giới nội.\n","warn"); return
         if report.status=="cycle":
-            rule = "Dantzig" if report.dantzig.steps and report.dantzig.steps[0].method == "dantzig" else "Bland"
-            if rule == "Dantzig":
-                self.output.insert(tk.END,"\nKẾT LUẬN\n  Dantzig phát hiện xoay vòng. Hãy thử Bland.\n","warn")
-            else:
-                self.output.insert(tk.END,"\nKẾT LUẬN\n  Bland phát hiện xoay vòng.\n","warn")
-            return
+            self.output.insert(tk.END,"\nKẾT LUẬN\n  Dantzig và Bland đều lặp.\n","warn"); return
         obj_std=report.objective_std or Fraction(0)
         obj_orig=report.objective_orig or Fraction(0)
         if report.multiple_optimal and final and report.multiple_optimal_vars:
@@ -1782,23 +1592,9 @@ class SimplexApp(Viz3DMixin, tk.Tk):
                 self.output.insert(tk.END,line+"\n","note")
         else:
             self.output.insert(tk.END,"\nKẾT LUẬN\n","h2")
-            method_lbl = "Dantzig Simplex" if report.used_method == "dantzig" else "Bland's Rule"
-            self.output.insert(tk.END,
-                f"  Tối ưu ({method_lbl}).\n"
-                f"  z* (bảng min) = {fmt_num(obj_std,mode)}\n"
-                f"  Giá trị gốc   = {fmt_num(obj_orig,mode)}\n",
-                "note")
-            # Nghiệm: mỗi xi một dòng, căn phải theo cụm "xi = val"
-            n_orig = len(engine.problem.var_signs)
-            sol_strs = [fmt_num(report.solution_orig.get(i, Fraction(0)), mode)
-                        for i in range(n_orig)]
-            val_w = max(len(s) for s in sol_strs)
-            var_w = max(len(f"x{i+1}") for i in range(n_orig))
-            self.output.insert(tk.END,"  Nghiệm tối ưu:\n","note")
-            for i, val_s in enumerate(sol_strs):
-                nm = f"x{i+1}".ljust(var_w)
-                val = val_s.rjust(val_w)
-                self.output.insert(tk.END, f"    {nm} = {val}\n", "note")
+            self.output.insert(tk.END,f"  Tối ưu ({report.used_method.upper()}).\n  z* (bảng min) = {fmt_num(obj_std,mode)}\n  Giá trị gốc: {fmt_num(obj_orig,mode)}\n","note")
+            orig_parts=[f"x{i+1} = {fmt_num(report.solution_orig.get(i,Fraction(0)),mode)}" for i in range(len(engine.problem.var_signs))]
+            self.output.insert(tk.END,"  Nghiệm: "+"  ;  ".join(orig_parts)+"\n","note")
         d=(report.dantzig.degenerate_steps or 0)+((report.bland.degenerate_steps if report.bland else 0) or 0)
         if d: self.output.insert(tk.END,f"  Có {d} bước suy biến.\n","warn")
 
@@ -1810,14 +1606,14 @@ class SimplexApp(Viz3DMixin, tk.Tk):
     def run_solver(self):
         # Điểm vào chính khi người dùng bấm "Chạy giải thuật" hoặc nhấn Ctrl+Alt+R:
         #   1. Thu thập dữ liệu từ giao diện (_collect_problem)
-        #   2. Tạo SimplexEngine và gọi solve_full() theo phương pháp người dùng đã chọn
+        #   2. Tạo SimplexEngine và gọi solve_full() để giải đầy đủ
         #   3. Lưu kết quả vào last_report / last_problem để xuất file / trực quan
         #   4. Hiển thị lời giải và cập nhật thanh trạng thái
         #   5. Bắt ngoại lệ (nhập liệu sai / lỗi giải thuật) và thông báo lỗi
         try:
             prob=self._collect_problem()
             engine=SimplexEngine(prob)
-            report=engine.solve_full(self.method_preference.get())
+            report=engine.solve_full()
             self.last_problem=prob; self.last_report=report
             self._render_result(report)
             self._set_solution_available(report.status=="optimal")
@@ -1826,11 +1622,3 @@ class SimplexApp(Viz3DMixin, tk.Tk):
             self.last_report=None; self._set_solution_available(False)
             messagebox.showerror("Lỗi nhập liệu / giải thuật",str(exc))
             self.status_var.set("Có lỗi xảy ra.")
-
-def main():
-    app = SimplexApp()
-    app.mainloop()
-
-
-if __name__ == "__main__":
-    main()
