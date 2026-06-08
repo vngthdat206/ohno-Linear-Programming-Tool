@@ -3,7 +3,6 @@ from __future__ import annotations
 from fractions import Fraction
 from typing import Any, Dict, List
 
-
 SENSES = ["≤", "≥", "="]
 VAR_SIGNS = ["≥0", "≤0", "tự do"]
 

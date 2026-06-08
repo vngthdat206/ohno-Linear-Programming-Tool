@@ -1,7 +1,28 @@
+### --- Python & Build ---
 __pycache__/
 *.py[cod]
-*.zip
-.venv/
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+### --- Virtual Environments ---
 venv/
+.venv/
 env/
-.DS_Store
+ENV/
+bin/

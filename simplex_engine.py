@@ -4,8 +4,9 @@ from copy import deepcopy
 from fractions import Fraction
 from typing import Dict, List, Optional, Tuple
 
-from models import ProblemData, Snapshot, PivotStep, SolveTrace, SolveReport
+from models import ProblemData, PivotStep, Snapshot, SolveReport, SolveTrace
 from utils import fr, fmt_num
+import locales
 
 
 class SimplexEngine:
@@ -38,12 +39,10 @@ class SimplexEngine:
         raw_obj = [fr(c) for c in self.problem.obj_coeffs]
         if self.problem.objective_sense == "max":
             std_obj = [-c for c in raw_obj]
-            self.standardization_lines.append(
-                "Chuyển bài toán max về min tương đương bằng cách nhân (-1) vào hàm mục tiêu."
-            )
+            self.standardization_lines.append(locales.t("max_to_min"))
         else:
             std_obj = raw_obj[:]
-            self.standardization_lines.append("Vì hàm mục tiêu là hàm min, đã ở dạng chuẩn nên giữ nguyên:")
+            self.standardization_lines.append(locales.t("min_keep"))
 
         self.variable_mapping = []
         self.std_names = []
@@ -54,13 +53,13 @@ class SimplexEngine:
                 j = len(self.std_names)
                 self.std_names.append(name)
                 self.variable_mapping.append([(j, Fraction(1))])
-                self.standardization_lines.append(f"  {name} ≥ 0: giữ nguyên {name} ≥ 0")
+                self.standardization_lines.append(f"  {name} ≥ 0: " + locales.t("keep_pos", name=name))
             elif sign == "≤0":
                 j = len(self.std_names)
                 y_name = f"y{idx + 1}"
                 self.std_names.append(y_name)
                 self.variable_mapping.append([(j, Fraction(-1))])
-                self.standardization_lines.append(f"  {name} ≤ 0: đặt {name} = -{y_name}, với {y_name} ≥ 0")
+                self.standardization_lines.append(f"  {name} ≤ 0: " + locales.t("sub_neg", name=name, y_name=y_name))
             elif sign == "tự do":
                 j1 = len(self.std_names)
                 a_name = f"a{idx + 1}"
@@ -70,7 +69,7 @@ class SimplexEngine:
                 self.std_names.append(b_name)
                 self.variable_mapping.append([(j1, Fraction(1)), (j2, Fraction(-1))])
                 self.standardization_lines.append(
-                    f"  {name} tự do: đặt {name} = {a_name} - {b_name}, với {a_name}, {b_name} ≥ 0"
+                    f"  {name} " + locales.t("sub_free", name=name, a_name=a_name, b_name=b_name)
                 )
             else:
                 raise ValueError(f"Kiểu dấu biến không hợp lệ: {sign}")
@@ -120,28 +119,22 @@ class SimplexEngine:
                 row = [-a for a in row]
                 rhs = -rhs
                 sense = "≤"
-                self.standardization_lines.append(
-                    f'  RB{i + 1}: do dấu của ràng buộc đã là "≥", nên nhân cả hai vế với (-1) để đưa về "≤".'
-                )
+                self.standardization_lines.append(locales.t("cons_neg_rhs", i=i+1))
             elif sense == "=":
-                slack_name = f"x{next_slack}"
-                next_slack += 1
-                self.std_names.append(slack_name)
-                self.std_obj_coeffs.append(Fraction(1))
-                row.append(Fraction(-1))
-                self.standardization_lines.append(
-                    f'  RB{i + 1}: do ràng buộc ở dạng đẳng thức "=", nên ta trừ thêm biến bù {slack_name} ≥ 0 vào vế trái.'
-                )
-                self.standardization_lines.append(f"  ---> RB{i + 1}:  {fmt_expr(row, self.std_names)} ≤ {fmt_num(rhs, 'Phân số')}")
+                if rhs < 0:
+                    row = [-a for a in row]
+                    rhs = -rhs
+                    self.standardization_lines.append(locales.t("cons_eq_neg", i=i+1))
+                else:
+                    self.standardization_lines.append(locales.t("cons_eq_pos", i=i+1))
                 self.std_constraints.append(row)
-                self.std_senses.append("≤")
+                self.std_senses.append("=")
                 self.std_rhs.append(rhs)
-                continue
-            elif sense == "≤":
                 self.standardization_lines.append(
-                    f'  RB{i + 1}: giữ nguyên, do dấu của ràng buộc đã là "≤"'
+                    f"  ---> RB{i + 1}:  {fmt_expr(row, self.std_names)} = {fmt_num(rhs, 'Phân số')}"
                 )
-            else:
+                continue
+            elif sense != "≤":
                 raise ValueError(f"Dấu ràng buộc không hợp lệ: {sense}")
 
             self.standardization_lines.append(f"  ---> RB{i + 1}:  {fmt_expr(row, self.std_names)} ≤ {fmt_num(rhs, 'Phân số')}")
@@ -149,7 +142,8 @@ class SimplexEngine:
             self.std_senses.append(sense)
             self.std_rhs.append(rhs)
 
-        self.standardization_lines.append("")
+            self.standardization_lines.append("")
+
     def _build_dictionary(self) -> None:
         self.all_names = self.std_names[:]
         next_slack = 1
@@ -158,20 +152,35 @@ class SimplexEngine:
         rhs: List[Fraction] = []
 
         for coeffs, sense, b in zip(self.std_constraints, self.std_senses, self.std_rhs):
-            if sense != "≤":
-                raise ValueError(f"Chỉ nhận ràng buộc dạng ≤ sau chuẩn hóa, nhận được: {sense}")
             row = {j: -a for j, a in enumerate(coeffs) if a != 0}
-            sidx = len(self.all_names)
-            self.all_names.append(f"w{next_slack}")
-            next_slack += 1
-            basis.append(sidx)
+            if sense == "≤":
+                # Thêm biến bù w_k; w_k là cơ sở ban đầu
+                sidx = len(self.all_names)
+                self.all_names.append(f"w{next_slack}")
+                next_slack += 1
+                basis.append(sidx)
+            elif sense == "=":
+                # Thêm biến giả art_k
+                sidx = len(self.all_names)
+                self.all_names.append(f"art{next_slack}")
+                next_slack += 1
+                basis.append(sidx)
+                self.artificial_vars.append(sidx)
+            else:
+                raise ValueError(f"Sense không hợp lệ sau chuẩn hóa: {sense}")
             rows.append(row)
             rhs.append(b)
 
         self.initial_basis = basis
         self.initial_rows = rows
         self.initial_rhs = rhs
-        self.artificial_vars = []
+        # artificial_vars đã được set trong _transform_constraints (ràng buộc =)
+        # need_aux_phase1: cần pha 1 bổ trợ (x0) khi có b_i < 0
+        # Nếu có biến độ nhiễu từ ràng buộc = thì dùng pha 1 cổ điển (nhánh artificial_vars)
+        # Nếu chỉ có b_i < 0 (không có =) thì dùng pha 1 bổ trợ x0
+        # need_aux_phase1: True khi có b_i < 0 sau chuẩn hóa (cần đưa x0 vào trước).
+        # Không phân biệt có/không có artificial_vars — x0 bổ trợ xử lý mọi b<0,
+        # biến độ nhiễu (ràng buộc =) vẫn nằm trong từ vựng và được loại bởi pha 1.
         self.need_aux_phase1 = any(b < 0 for b in self.initial_rhs)
     # ---------- dictionary operations ----------
     @staticmethod
@@ -284,10 +293,10 @@ class SimplexEngine:
     ) -> Snapshot:
         return Snapshot(
             basis=basis[:],
-            rows=[deepcopy(r) for r in rows],
+            rows=[dict(r) for r in rows],
             rhs=rhs[:],
             obj_const=obj_const,
-            obj=deepcopy(obj),
+            obj=dict(obj),
             phase=phase,
             objective_label=objective_label,
             all_names=self.all_names[:],
@@ -331,13 +340,7 @@ class SimplexEngine:
         max_iter = 500
 
         def signature() -> Tuple:
-            return (
-                tuple(basis),
-                tuple(sorted((i, tuple(sorted(r.items())), rhs[i]) for i, r in enumerate(rows))),
-                obj_const,
-                tuple(sorted(obj.items())),
-                phase,
-            )
+            return (frozenset(basis), phase)
 
         for iteration in range(1, max_iter + 1):
             sig = signature()
@@ -573,16 +576,62 @@ class SimplexEngine:
 
 
     def _phase2_start(self, snapshot: Snapshot, strip_vars: Optional[List[int]] = None) -> Tuple[List[int], List[Dict[int, Fraction]], List[Fraction], Fraction, Dict[int, Fraction]]:
-        # Rebuild the phase-2 objective from the current basis.
         basis = snapshot.basis[:]
         rows = [deepcopy(r) for r in snapshot.rows]
         rhs = snapshot.rhs[:]
 
-        if strip_vars:
-            strip_set = set(strip_vars)
-            for row in rows:
-                for v in strip_set:
-                    row.pop(v, None)
+        # Tập biến cần loại: x0 (strip_vars) + artificial_vars từ ràng buộc =
+        strip_set = set(strip_vars or []) | set(self.artificial_vars)
+
+        # Nếu biến cần loại còn degenerate trong basis (rhs=0),
+        # thực hiện degenerate pivot để đưa biến thực ra thay thế.
+        for i, b in enumerate(basis):
+            if b not in strip_set:
+                continue
+            if rhs[i] != 0:
+                continue  # rhs>0 → infeasible đã được check trước
+            # Tìm biến phi cơ sở có hệ số khác 0 trong hàng này để swap (degenerate pivot)
+            for j, a in rows[i].items():
+                if j in strip_set or j in basis:
+                    continue
+                if a != 0:
+                    # Degenerate pivot: đưa j vào, b ra (rhs không đổi = 0)
+                    basis[i] = j
+                    d = a
+                    new_row: Dict[int, Fraction] = {b: Fraction(1) / d}
+                    for k, v in rows[i].items():
+                        if k != j:
+                            new_row[k] = -v / d
+                    rows[i] = {k: v for k, v in new_row.items() if v != 0}
+                    rhs[i] = Fraction(0)
+                    # Cập nhật các hàng khác
+                    for ii in range(len(rows)):
+                        if ii == i:
+                            continue
+                        a_ii = rows[ii].get(j, Fraction(0))
+                        if a_ii == 0:
+                            continue
+                        rhs[ii] = rhs[ii] + a_ii * Fraction(0)  # rhs[i]=0
+                        upd: Dict[int, Fraction] = {}
+                        upd[b] = a_ii / d
+                        for k, v in rows[i].items():
+                            if k == j:
+                                continue
+                            c2 = rows[ii].get(k, Fraction(0)) - a_ii * v / d
+                            if c2 != 0:
+                                upd[k] = c2
+                        for k, v in rows[ii].items():
+                            if k == j or k in rows[i]:
+                                continue
+                            if v != 0:
+                                upd[k] = v
+                        rows[ii] = {k: v for k, v in upd.items() if v != 0}
+                    break
+
+        # Xóa cột của các biến cần strip khỏi tất cả các hàng
+        for row in rows:
+            for v in strip_set:
+                row.pop(v, None)
 
         raw_obj = {j: c for j, c in enumerate(self.std_obj_coeffs) if c != 0}
         raw_const = Fraction(0)
@@ -593,6 +642,7 @@ class SimplexEngine:
         basis = self.initial_basis[:]
         rows = [deepcopy(r) for r in self.initial_rows]
         rhs = self.initial_rhs[:]
+        # Pha 1: min Σ a_k (tổng các biến độ nhiễu)
         raw_obj = {a: Fraction(1) for a in self.artificial_vars}
         const, obj = self._canonicalize(basis, rows, rhs, raw_obj, Fraction(0))
         return basis, rows, rhs, const, obj
@@ -601,89 +651,158 @@ class SimplexEngine:
     def solve_full(self, preferred_method: str = "dantzig") -> SolveReport:
         notes = self.standardization_lines[:] + self.strict_notes[:]
 
+        # Chuẩn hóa tham số phương pháp; v1 vẫn giữ nguyên auto-fallback sang Bland khi cycle
         method = (preferred_method or "dantzig").strip().lower()
         if method in {"dantzig simplex", "dantzig", "d"}:
-            method_key = "dantzig"
+            primary_method = "dantzig"
         elif method in {"bland's rule", "bland", "blands rule", "bland rule"}:
-            method_key = "bland"
+            primary_method = "bland"
         else:
-            raise ValueError("Phương pháp giải không hợp lệ. Hãy chọn Dantzig Simplex hoặc Bland's Rule.")
+            primary_method = "dantzig"
 
         if self.need_aux_phase1:
             basis, rows, rhs, obj_const, obj, aux_idx = self._phase1_aux_start()
-            phase1 = self._solve_phase1_aux_once(method_key, basis, rows, rhs, obj_const, obj, "δ", aux_idx)
-
-            if phase1.status == "cycle":
+            phase1 = self._solve_phase1_aux_once(primary_method, basis, rows, rhs, obj_const, obj, "δ", aux_idx)
+            phase1_bland = None
+            if phase1.status == "cycle" and primary_method == "dantzig":
+                phase1_bland = self._solve_phase1_aux_once("bland", basis, rows, rhs, obj_const, obj, "δ", aux_idx)
+                if phase1_bland.status == "cycle":
+                    return self._assemble_report(
+                        "bland", phase1, phase1_bland, notes, phase1_infeasible=False,
+                        phase1_bland=phase1_bland, phase2_trace=None
+                    )
+                phase1 = phase1_bland
+                used = "bland"
+            elif phase1.status == "cycle":
                 return self._assemble_report(
-                    method_key, phase1, None, notes, phase1_infeasible=False,
+                    primary_method, phase1, None, notes, phase1_infeasible=False,
                     phase1_bland=None, phase2_trace=None
                 )
+            else:
+                used = primary_method
 
             if phase1.final_snapshot is None:
                 return self._assemble_report(
-                    method_key, phase1, None, notes, phase1_infeasible=True,
-                    phase1_bland=None, phase2_trace=None
+                    used, phase1, None, notes, phase1_infeasible=True,
+                    phase1_bland=phase1_bland, phase2_trace=None
                 )
 
-            # x0 không còn nằm trong cơ sở và giá trị mục tiêu pha 1 bằng 0 => sang pha 2
-            aux_idx_in_basis = aux_idx in phase1.final_snapshot.basis
-            if phase1.final_snapshot.obj_const != 0 or aux_idx_in_basis:
+            # Feasible ↔ δ* = 0 (obj_const=0). x0 degenerate (rhs=0) trong basis vẫn ok.
+            snap1 = phase1.final_snapshot
+            x0_pos = (aux_idx in snap1.basis and
+                      snap1.rhs[list(snap1.basis).index(aux_idx)] > 0)
+            if phase1.final_snapshot.obj_const != 0 or x0_pos:
                 phase1.infeasible = True
                 phase1.status = "infeasible"
                 return self._assemble_report(
-                    method_key, phase1, None, notes, phase1_infeasible=True,
-                    phase1_bland=None, phase2_trace=None
+                    used, phase1, None, notes, phase1_infeasible=True,
+                    phase1_bland=phase1_bland, phase2_trace=None
                 )
 
+            # Nếu còn biến độ nhiễu (từ ràng buộc =), tiếp tục pha 1 cổ điển
+            # để đẩy chúng ra khỏi cơ sở (loại x0 trước khi chạy)
+            if self.artificial_vars:
+                # Xây dựng từ vựng trung gian: loại x0 khỏi các hàng
+                basis1b, rows1b, rhs1b, const1b, obj1b = self._phase2_start(snap1, strip_vars=[aux_idx])
+                # Objective pha 1b: min Σ art_k (chỉ các biến độ nhiễu còn lại)
+                art_set = set(self.artificial_vars)
+                raw_obj1b = {a: Fraction(1) for a in self.artificial_vars}
+                const1b, obj1b = self._canonicalize(basis1b, rows1b, rhs1b, raw_obj1b, Fraction(0))
+                phase1b = self._solve_once(used, 1, basis1b, rows1b, rhs1b, const1b, obj1b, "δ", self.artificial_vars)
+                # Ghép steps
+                for st in phase1b.steps:
+                    st.iteration += len(phase1.steps) + 1
+                combined_steps = phase1.steps + phase1b.steps
+                phase1 = SolveTrace(
+                    status=phase1b.status,
+                    steps=combined_steps,
+                    final_snapshot=phase1b.final_snapshot,
+                    degenerate_steps=phase1.degenerate_steps + phase1b.degenerate_steps,
+                    cycle_detected=phase1b.cycle_detected,
+                    infeasible=phase1b.infeasible,
+                    unbounded=phase1b.unbounded,
+                    multiple_optimal=phase1b.multiple_optimal,
+                    phase1_infeasible=phase1b.phase1_infeasible,
+                )
+                snap1 = phase1.final_snapshot
+                # Kiểm tra: biến độ nhiễu còn trong cơ sở với rhs > 0 → infeasible
+                if snap1 is None or snap1.obj_const != 0 or any(
+                    snap1.rhs[i] != 0
+                    for i, b in enumerate(snap1.basis) if b in art_set
+                ):
+                    phase1.infeasible = True
+                    phase1.status = "infeasible"
+                    return self._assemble_report(
+                        used, phase1, None, notes, phase1_infeasible=True,
+                        phase1_bland=phase1_bland, phase2_trace=None
+                    )
+
             basis2, rows2, rhs2, obj_const2, obj2 = self._phase2_start(phase1.final_snapshot, strip_vars=[aux_idx])
-            phase2 = self._solve_once(method_key, 2, basis2, rows2, rhs2, obj_const2, obj2, "z", self.artificial_vars)
+            obj_lbl2 = "z'" if self.problem.objective_sense == "max" else "z"
+            phase2 = self._solve_once(used, 2, basis2, rows2, rhs2, obj_const2, obj2, obj_lbl2, self.artificial_vars)
             return self._assemble_report(
-                method_key, phase1, None, notes, phase1_infeasible=False,
-                phase1_bland=None, phase2_trace=phase2
+                used, phase1, phase2, notes, phase1_infeasible=False,
+                phase1_bland=phase1_bland, phase2_trace=phase2
             )
 
         if self.artificial_vars:
             # Phase 1 first.
             basis, rows, rhs, obj_const, obj = self._phase1_start()
-            phase1 = self._solve_once(method_key, 1, basis, rows, rhs, obj_const, obj, "w", self.artificial_vars)
-
-            if phase1.status == "cycle":
+            phase1 = self._solve_once(primary_method, 1, basis, rows, rhs, obj_const, obj, "w", self.artificial_vars)
+            phase1_bland = None
+            if phase1.status == "cycle" and primary_method == "dantzig":
+                phase1_bland = self._solve_once("bland", 1, basis, rows, rhs, obj_const, obj, "w", self.artificial_vars)
+                if phase1_bland.status == "cycle":
+                    return self._assemble_report(
+                        "bland", phase1, phase1_bland, notes, phase1_infeasible=False,
+                        phase1_bland=phase1_bland, phase2_trace=None
+                    )
+                phase1 = phase1_bland
+                used = "bland"
+            elif phase1.status == "cycle":
                 return self._assemble_report(
-                    method_key, phase1, None, notes, phase1_infeasible=False,
+                    primary_method, phase1, None, notes, phase1_infeasible=False,
                     phase1_bland=None, phase2_trace=None
                 )
+            else:
+                used = primary_method
 
             if phase1.final_snapshot is None:
                 return self._assemble_report(
-                    method_key, phase1, None, notes, phase1_infeasible=True,
-                    phase1_bland=None, phase2_trace=None
+                    used, phase1, None, notes, phase1_infeasible=True,
+                    phase1_bland=phase1_bland, phase2_trace=None
                 )
 
             if phase1.final_snapshot.obj_const != 0:
                 phase1.infeasible = True
                 phase1.status = "infeasible"
                 return self._assemble_report(
-                    method_key, phase1, None, notes, phase1_infeasible=True,
-                    phase1_bland=None, phase2_trace=None
+                    used, phase1, None, notes, phase1_infeasible=True,
+                    phase1_bland=phase1_bland, phase2_trace=None
                 )
 
             basis2, rows2, rhs2, obj_const2, obj2 = self._phase2_start(phase1.final_snapshot)
-            phase2 = self._solve_once(method_key, 2, basis2, rows2, rhs2, obj_const2, obj2, "z", self.artificial_vars)
+            obj_lbl2 = "z'" if self.problem.objective_sense == "max" else "z"
+            phase2 = self._solve_once(used, 2, basis2, rows2, rhs2, obj_const2, obj2, obj_lbl2, self.artificial_vars)
             return self._assemble_report(
-                method_key, phase1, None, notes, phase1_infeasible=False,
-                phase1_bland=None, phase2_trace=phase2
+                used, phase1, phase2, notes, phase1_infeasible=False,
+                phase1_bland=phase1_bland, phase2_trace=phase2
             )
 
         # No artificials => phase 2 only.
-        basis, rows, rhs, obj_const, obj = self._phase2_start(
-            self._state(self.initial_basis, self.initial_rows, self.initial_rhs, Fraction(0), {}, 2, "z", self.artificial_vars)
-        )
-        trace = self._solve_once(method_key, 2, basis, rows, rhs, obj_const, obj, "z", self.artificial_vars)
+        obj_lbl = "z'" if self.problem.objective_sense == "max" else "z"
+        basis, rows, rhs, obj_const, obj = self._phase2_start(self._state(self.initial_basis, self.initial_rows, self.initial_rhs, Fraction(0), {}, 2, obj_lbl, self.artificial_vars))
+        dantzig = self._solve_once(primary_method, 2, basis, rows, rhs, obj_const, obj, obj_lbl, self.artificial_vars)
+        if dantzig.status == "cycle" and primary_method == "dantzig":
+            bland = self._solve_once("bland", 2, basis, rows, rhs, obj_const, obj, obj_lbl, self.artificial_vars)
+            return self._assemble_report(
+                "bland", dantzig, bland, notes, phase1_infeasible=False,
+                phase1_bland=None, phase2_trace=bland
+            )
         return self._assemble_report(
-            method_key, trace, None, notes, phase1_infeasible=False,
-            phase1_bland=None, phase2_trace=trace
+            primary_method, dantzig, None, notes, phase1_infeasible=False,
+            phase1_bland=None, phase2_trace=dantzig
         )
-
 
     def _assemble_report(
         self,
@@ -740,15 +859,35 @@ class SimplexEngine:
             obj_orig = obj_std
 
         # Phát hiện vô số nghiệm:
-        # Một biến không cơ sở có hệ số 0 trên hàng mục tiêu và còn có thể thay đổi một chút
-        # mà không phá tính khả thi thì sẽ sinh ra vô số nghiệm tối ưu.
+        # Biến không cơ sở có hệ số 0 trên hàm mục tiêu VÀ có thể tăng mà không phá khả thi.
+        # Loại bỏ: biến độ nhiễu, và cặp (a_i, b_i) của biến tự do (vì a_i - b_i = const nên
+        # cả hai đều có c=0 nhưng thực ra nghiệm là duy nhất theo biến gốc x_i).
+        art_set = set(self.artificial_vars)
+
+        # Xây dựng tập các biến "đối ngẫu" của biến tự do:
+        # Nếu x_i tự do → x_i = a_j - b_j; nếu a_j hoặc b_j đều ở ngoài cơ sở với c=0
+        # thì không thực sự tự do vì chúng ràng buộc nhau.
+        free_var_pairs: set[int] = set()
+        for mapping in self.variable_mapping:
+            if len(mapping) == 2:
+                j1, j2 = mapping[0][0], mapping[1][0]
+                free_var_pairs.add(j1)
+                free_var_pairs.add(j2)
+
         basis_set = set(snapshot.basis)
         multiple = False
         free_vars: List[int] = []
-        for j in range(len(self.std_names)):
+        for j in range(len(self.all_names)):
             if j in basis_set:
                 continue
+            if j in art_set:
+                continue
             if snapshot.obj.get(j, Fraction(0)) != 0:
+                continue
+            # Nếu j là một trong cặp biến tự do, chỉ thêm nếu đối ngẫu của nó cũng ngoài cơ sở
+            # → thực sự tham số tự do (biến gốc x_i = a_j - b_j không cố định)
+            # Để đơn giản: bỏ qua cả cặp, tức không coi là vô số nghiệm do cặp tự do
+            if j in free_var_pairs:
                 continue
 
             col = [row.get(j, Fraction(0)) for row in snapshot.rows]
